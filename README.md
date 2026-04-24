@@ -55,11 +55,30 @@ You can also set DEEPSEEK_API_KEY as a fallback when LLM_API_KEY is empty.
 - Keep personal memory files local, such as backend/memory/taste.md.
 - Before pushing, run git status and confirm no sensitive files are staged.
 
+Detailed runbook:
+
+- docs/security-playbook.md
+
+Pre-push scanner:
+
+- VS Code Task: Scan Secrets (Tracked Files)
+
+Pre-commit protection:
+
+- VS Code Task: Install Git Hooks (run once per clone)
+- Hook file: .githooks/pre-commit
+
 ## Initial API routes
 
 - GET /health
 - GET /ready
 - POST /v1/agent/respond
+   - reply is a strict JSON object with keys:
+      - analysis: string
+      - answer: string
+      - actions: string[]
+      - provider: string
+      - model: string
 
 ## Iteration plan
 

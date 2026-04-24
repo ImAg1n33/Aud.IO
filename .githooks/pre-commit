@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+echo "[pre-commit] Running secret scanner..."
+
+if [ -n "${AUDIO_PYTHON:-}" ]; then
+  "$AUDIO_PYTHON" scripts/security_scan.py
+elif command -v conda >/dev/null 2>&1; then
+  conda run -n audio-clean python scripts/security_scan.py
+elif [ -x "/d/Anaconda/Scripts/conda.exe" ]; then
+  /d/Anaconda/Scripts/conda.exe run -n audio-clean python scripts/security_scan.py
+elif [ -x "/c/Users/Lee/.conda/envs/audio-clean/python.exe" ]; then
+  /c/Users/Lee/.conda/envs/audio-clean/python.exe scripts/security_scan.py
+elif command -v py >/dev/null 2>&1; then
+  py -3 scripts/security_scan.py
+elif command -v python >/dev/null 2>&1; then
+  python scripts/security_scan.py
+else
+  echo "[pre-commit] Python is not available in PATH."
+  echo "[pre-commit] Install Python or run: D:/Anaconda/Scripts/conda.exe run -n audio-clean python scripts/security_scan.py"
+  exit 1
+fi
+
+STATUS=$?
+if [ "$STATUS" -ne 0 ]; then
+  echo "[pre-commit] Commit blocked by secret scanner."
+fi
+
+exit "$STATUS"

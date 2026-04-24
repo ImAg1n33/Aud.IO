@@ -17,5 +17,17 @@
     - user_input: string
     - context: object (optional)
   - response:
-    - reply: string
+    - reply: object
+      - analysis: string
+      - answer: string
+      - actions: string[]
+      - play_keyword: string
+      - provider: string
+      - model: string
+      - music: object (optional)
+        - requested_keyword: string
+        - song_id: string
+        - name: string
+        - artist: string
+        - mp3_url: string
     - prompt: string

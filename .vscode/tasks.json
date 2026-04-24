@@ -1,0 +1,50 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Aud.IO Backend",
+			"type": "shell",
+			"command": "D:\\Anaconda\\Scripts\\conda.exe",
+			"args": [
+				"run",
+				"-n",
+				"audio-clean",
+				"python",
+				"-m",
+				"uvicorn",
+				"backend.main:app",
+				"--reload",
+				"--host",
+				"127.0.0.1",
+				"--port",
+				"8000"
+			],
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "Scan Secrets (Tracked Files)",
+			"type": "shell",
+			"command": "D:\\Anaconda\\Scripts\\conda.exe",
+			"args": [
+				"run",
+				"-n",
+				"audio-clean",
+				"python",
+				"scripts/security_scan.py"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Install Git Hooks",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"config",
+				"core.hooksPath",
+				".githooks"
+			],
+			"group": "build"
+		}
+	]
+}

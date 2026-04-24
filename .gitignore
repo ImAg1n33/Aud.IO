@@ -20,6 +20,7 @@ env/
 backend/memory/*.md
 !backend/memory/*.example.md
 !backend/memory/README.md
+backend/qrcode.png
 
 # Frontend
 node_modules/

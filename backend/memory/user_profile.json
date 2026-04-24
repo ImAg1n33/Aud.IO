@@ -1,0 +1,35 @@
+{
+  "core_taste": [
+    "pop",
+    "rock",
+    "lofi"
+  ],
+  "artist_preference": {
+    "liked": [
+      "Artist A",
+      "Artist B"
+    ],
+    "disliked": [
+      "Artist X"
+    ]
+  },
+  "mood_bias": {
+    "focused": [
+      "lofi",
+      "ambient"
+    ],
+    "happy": [
+      "dance-pop",
+      "funk"
+    ],
+    "calm": [
+      "acoustic",
+      "jazz"
+    ],
+    "sad": [
+      "piano",
+      "ballad"
+    ]
+  },
+  "last_updated": "2026-04-24T00:00:00Z"
+}

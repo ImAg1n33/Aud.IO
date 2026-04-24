@@ -20,7 +20,11 @@
 				"8000"
 			],
 			"isBackground": true,
-			"group": "build"
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			},
+			"problemMatcher": []
 		},
 		{
 			"label": "Scan Secrets (Tracked Files)",

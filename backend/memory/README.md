@@ -2,10 +2,19 @@
 
 This folder stores local, user-specific context for the agent.
 
+## Runtime-updated files
+
+- user_profile.json: updated by MemoryManager background worker
+- memory_update.log: audit trail for memory update status
+
 ## Keep local only (do not commit)
 
 - taste.md
 - routines.md
+
+Note:
+
+- taste.md and routines.md are manual/local notes and are not auto-updated by the current memory pipeline.
 
 ## Commit-safe templates
 

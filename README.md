@@ -5,6 +5,8 @@ Aud.IO is an AI voice assistant project with a FastAPI backend and a frontend UI
 ## Project layout
 
 - backend: FastAPI API, agent orchestration, memory context, tool wrappers
+   - backend/api: route layer
+   - backend/services: business orchestration layer
 - frontend: UI app (Vue 3 or React + Nothing Design direction)
 - docs: architecture notes and API docs
 
@@ -20,6 +22,31 @@ Aud.IO is an AI voice assistant project with a FastAPI backend and a frontend UI
    - copy backend/memory/routines.example.md backend/memory/routines.md
 5. Run API server:
    - uvicorn backend.main:app --reload --port 8000
+
+## Testing
+
+1. Install dev dependencies:
+   - pip install -r requirements-dev.txt
+2. Run test suite:
+   - pytest
+
+Current test scope:
+
+- CORS parsing behavior
+- Agent route response contract
+- Assistant service orchestration
+- MemoryManager async JSON Patch update flow
+
+## CI
+
+GitHub Actions workflow is defined in:
+
+- .github/workflows/ci.yml
+
+It runs on push to main and pull requests, and executes:
+
+1. pytest
+2. scripts/security_scan.py
 
 ## LLM environment strategy (for open source)
 
@@ -46,6 +73,11 @@ In backend/.env:
 - LLM_API_KEY=your_real_deepseek_key
 
 You can also set DEEPSEEK_API_KEY as a fallback when LLM_API_KEY is empty.
+
+### CORS allowlist
+
+- Configure `CORS_ALLOW_ORIGINS` in `backend/.env` as comma-separated origins.
+- Default template value is local frontend dev origins only.
 
 ## Open-source safety checklist
 

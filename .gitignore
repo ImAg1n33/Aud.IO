@@ -21,6 +21,7 @@ backend/memory/*.md
 !backend/memory/*.example.md
 !backend/memory/README.md
 backend/qrcode.png
+backend/memory/memory_update.log
 
 # Frontend
 node_modules/

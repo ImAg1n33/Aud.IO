@@ -206,7 +206,7 @@
 
         try {
             // 向本地 FastAPI 发送请求
-            const response = await fetch("http://127.0.0.1:8000/v1/agent/respond", {
+            const response = await fetch("http://127.0.0.1:8001/v1/agent/respond", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({

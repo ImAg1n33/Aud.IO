@@ -1,19 +1,18 @@
 import asyncio
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 
+from backend.agent.llm_client import request_json_object
 from backend.agent.prompt_builder import build_memory_observer_messages
 
 
 logger = logging.getLogger(__name__)
+SLOW_CRITIC_MODEL = "deepseek-reasoner"
 
 
 class MemoryManager:
@@ -43,7 +42,8 @@ class MemoryManager:
         profile = json.loads(raw)
         if not isinstance(profile, dict):
             raise ValueError("user_profile.json must be a JSON object.")
-        return profile
+        normalized = self._normalize_profile_schema(profile)
+        return normalized
 
     async def async_update_profile(self, user_input: str, assistant_reply: str) -> dict[str, Any]:
         """Asynchronously update profile using a small model and JSON Patch.
@@ -71,6 +71,7 @@ class MemoryManager:
             return current_profile
 
         updated_profile = await asyncio.to_thread(self._apply_patch_safe, current_profile, patch_ops)
+        updated_profile = self._normalize_profile_schema(updated_profile)
         updated_profile["last_updated"] = self._utc_now_iso()
 
         await asyncio.to_thread(
@@ -95,69 +96,35 @@ class MemoryManager:
         assistant_reply: str,
         old_profile: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        config = self._memory_model_config()
-        if not config["api_key"]:
-            self._append_audit_log({"status": "skipped", "reason": "MEMORY_API_KEY/LLM_API_KEY missing"})
-            return []
+        messages = build_memory_observer_messages(old_profile, user_input, assistant_reply)
 
-        endpoint = f"{config['base_url'].rstrip('/')}/chat/completions"
-        errors: list[str] = []
-        for model in self._candidate_models(config["model"]):
-            body = {
-                "model": model,
-                "temperature": 0.1,
-                "response_format": {"type": "json_object"},
-                "messages": build_memory_observer_messages(old_profile, user_input, assistant_reply),
-            }
+        try:
+            parsed = request_json_object(messages=messages, model=SLOW_CRITIC_MODEL, temperature=0.1)
 
-            req = Request(
-                endpoint,
-                data=json.dumps(body).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {config['api_key']}",
-                },
-                method="POST",
+            # No obvious preference changes.
+            if parsed == {}:
+                self._append_audit_log({"status": "no_change", "model": SLOW_CRITIC_MODEL})
+                return []
+
+            if isinstance(parsed.get("patch"), list):
+                normalized = self._normalize_patch(parsed["patch"])
+            else:
+                # Compatibility: if model returns direct update object, convert to replace ops.
+                object_patch = self._convert_object_to_patch(parsed)
+                normalized = self._normalize_patch(object_patch)
+
+            self._append_audit_log(
+                {
+                    "status": "model_ok",
+                    "model": SLOW_CRITIC_MODEL,
+                    "patch_count": len(normalized),
+                }
             )
-
-            try:
-                with urlopen(req, timeout=60) as resp:
-                    raw = resp.read().decode("utf-8")
-                completion = json.loads(raw)
-                content = completion["choices"][0]["message"]["content"]
-                parsed = self._extract_json_object(content)
-
-                # No obvious preference changes.
-                if parsed == {}:
-                    self._append_audit_log({"status": "no_change", "model": model})
-                    return []
-
-                if isinstance(parsed.get("patch"), list):
-                    normalized = self._normalize_patch(parsed["patch"])
-                else:
-                    # Compatibility: if model returns direct update object, convert to replace ops.
-                    object_patch = self._convert_object_to_patch(parsed)
-                    normalized = self._normalize_patch(object_patch)
-
-                self._append_audit_log(
-                    {
-                        "status": "model_ok",
-                        "model": model,
-                        "patch_count": len(normalized),
-                    }
-                )
-                return normalized
-            except HTTPError as exc:
-                detail = self._read_http_error_detail(exc)
-                errors.append(f"{model}: HTTP {exc.code} {detail}")
-                logger.warning("Memory model request failed with HTTP %s: %s", exc.code, detail)
-            except (URLError, TimeoutError, KeyError, json.JSONDecodeError, ValueError) as exc:
-                errors.append(f"{model}: {exc}")
-                logger.warning("Memory model request failed: %s", exc)
-
-        if errors:
-            self._append_audit_log({"status": "failed", "errors": errors})
-        return []
+            return normalized
+        except Exception as exc:
+            logger.warning("Memory model request failed: %s", exc)
+            self._append_audit_log({"status": "failed", "model": SLOW_CRITIC_MODEL, "error": str(exc)})
+            return []
 
     def _normalize_patch(self, patch: list[Any]) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
@@ -184,63 +151,6 @@ class MemoryManager:
             if field in payload:
                 patch.append({"op": "replace", "path": f"/{field}", "value": payload[field]})
         return patch
-
-    def _memory_model_config(self) -> dict[str, str]:
-        base_url = os.getenv("MEMORY_BASE_URL", "").strip() or os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
-        model = os.getenv("MEMORY_MODEL", "").strip() or os.getenv("LLM_MODEL", "deepseek-chat").strip()
-        api_key = os.getenv("MEMORY_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip()
-        return {
-            "base_url": base_url,
-            "model": model,
-            "api_key": api_key,
-        }
-
-    def _candidate_models(self, configured_model: str) -> list[str]:
-        candidates = [
-            configured_model.strip(),
-            os.getenv("LLM_MODEL", "").strip(),
-            "deepseek-chat",
-        ]
-
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for model in candidates:
-            if not model or model in seen:
-                continue
-            seen.add(model)
-            deduped.append(model)
-        return deduped
-
-    def _read_http_error_detail(self, exc: HTTPError) -> str:
-        try:
-            body = exc.read().decode("utf-8")
-            parsed = json.loads(body)
-            if isinstance(parsed, dict):
-                error = parsed.get("error")
-                if isinstance(error, dict):
-                    message = error.get("message")
-                    if isinstance(message, str):
-                        return message
-            return body
-        except Exception:
-            return str(exc)
-
-    def _extract_json_object(self, text: str) -> dict[str, Any]:
-        stripped = text.strip()
-        try:
-            parsed = json.loads(stripped)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            parsed = json.loads(stripped[start : end + 1])
-            if isinstance(parsed, dict):
-                return parsed
-        raise ValueError("Model output is not valid JSON object.")
 
     def _is_allowed_patch_path(self, path: str) -> bool:
         return path == "/core_taste" or path.startswith("/core_taste/") or path == "/artist_preference" or path.startswith(
@@ -344,6 +254,53 @@ class MemoryManager:
             "mood_bias": {},
             "last_updated": self._utc_now_iso(),
         }
+
+    def _normalize_profile_schema(self, profile: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(profile)
+
+        core_taste = normalized.get("core_taste", [])
+        if isinstance(core_taste, list):
+            normalized["core_taste"] = [str(item).strip() for item in core_taste if str(item).strip()]
+        elif isinstance(core_taste, str) and core_taste.strip():
+            normalized["core_taste"] = [core_taste.strip()]
+        else:
+            normalized["core_taste"] = []
+
+        artist_preference = normalized.get("artist_preference", {})
+        if not isinstance(artist_preference, dict):
+            artist_preference = {}
+
+        liked = artist_preference.get("liked", [])
+        disliked = artist_preference.get("disliked", [])
+
+        artist_preference["liked"] = self._coerce_string_list(liked)
+        artist_preference["disliked"] = self._coerce_string_list(disliked)
+        normalized["artist_preference"] = artist_preference
+
+        mood_bias = normalized.get("mood_bias", {})
+        if not isinstance(mood_bias, dict):
+            mood_bias = {}
+        cleaned_mood_bias: dict[str, list[str]] = {}
+        for key, value in mood_bias.items():
+            key_str = str(key).strip()
+            if not key_str:
+                continue
+            cleaned_mood_bias[key_str] = self._coerce_string_list(value)
+        normalized["mood_bias"] = cleaned_mood_bias
+
+        last_updated = normalized.get("last_updated")
+        if not isinstance(last_updated, str) or not last_updated.strip():
+            normalized["last_updated"] = self._utc_now_iso()
+
+        return normalized
+
+    def _coerce_string_list(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            return list(dict.fromkeys(items))
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
 
     def _append_audit_log(self, payload: dict[str, Any]) -> None:
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)

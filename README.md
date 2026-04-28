@@ -1,120 +1,120 @@
 # Aud.IO
 
-Aud.IO is an AI voice assistant project with a FastAPI backend and a frontend UI.
+Aud.IO 是一个具备 FastAPI 后端与前端界面的 AI 语音助手项目。
 
-## Project layout
+## 项目结构
 
-- backend: FastAPI API, agent orchestration, memory context, tool wrappers
-   - backend/api: route layer
-   - backend/services: business orchestration layer
-- frontend: UI app (Vue 3 or React + Nothing Design direction)
-- docs: architecture notes and API docs
+- backend: FastAPI 接口、智能体编排、记忆上下文与工具封装
+   - backend/api: 路由层
+   - backend/services: 业务编排层
+- frontend: 前端 UI（建议 Vue 3 或 React，Nothing Design 风格）
+- docs: 架构说明与 API 文档
 
-## Quick start
+## 快速开始
 
-1. Create and activate a Python virtual environment.
-2. Install backend dependencies:
+1. 创建并激活 Python 虚拟环境。
+2. 安装后端依赖：
    - pip install -r backend/requirements.txt
-3. Copy env template:
+3. 复制环境变量模板：
    - copy backend/.env.example backend/.env
-4. (Optional) Copy local memory templates:
+4. （可选）复制本地记忆模板：
    - copy backend/memory/taste.example.md backend/memory/taste.md
    - copy backend/memory/routines.example.md backend/memory/routines.md
-5. Run API server:
-   - uvicorn backend.main:app --reload --port 8000
+5. 启动 API 服务：
+   - uvicorn backend.main:app --reload --port 8001
 
-## Testing
+## 测试
 
-1. Install dev dependencies:
+1. 安装开发依赖：
    - pip install -r requirements-dev.txt
-2. Run test suite:
+2. 运行测试：
    - pytest
 
-Current test scope:
+当前测试覆盖：
 
-- CORS parsing behavior
-- Agent route response contract
-- Assistant service orchestration
-- MemoryManager async JSON Patch update flow
+- CORS 解析逻辑
+- Agent 路由响应协议
+- Assistant 服务编排
+- MemoryManager 异步 JSON Patch 更新流程
 
 ## CI
 
-GitHub Actions workflow is defined in:
+GitHub Actions 配置位于：
 
 - .github/workflows/ci.yml
 
-It runs on push to main and pull requests, and executes:
+触发条件：push 到 main 或 PR。执行内容：
 
 1. pytest
 2. scripts/security_scan.py
 
-## LLM environment strategy (for open source)
+## LLM 环境策略（开源友好）
 
-Use a provider-agnostic env schema in backend/.env.example:
+在 backend/.env.example 中使用通用的环境变量格式：
 
 - LLM_PROVIDER
 - LLM_BASE_URL
 - LLM_MODEL
 - LLM_API_KEY
 
-Why this is recommended:
+推荐理由：
 
-- One stable format for DeepSeek, OpenAI, Anthropic, and future providers.
-- Easier onboarding for contributors.
-- Keep backend/.env local only; commit backend/.env.example only.
+- 统一适配 DeepSeek、OpenAI、Anthropic 以及后续模型
+- 协作者更容易上手
+- 只提交 backend/.env.example，backend/.env 保持本地
 
-### DeepSeek local example
+### DeepSeek 本地示例
 
-In backend/.env:
+在 backend/.env 中配置：
 
 - LLM_PROVIDER=deepseek
 - LLM_BASE_URL=https://api.deepseek.com
 - LLM_MODEL=deepseek-chat
 - LLM_API_KEY=your_real_deepseek_key
 
-You can also set DEEPSEEK_API_KEY as a fallback when LLM_API_KEY is empty.
+当 LLM_API_KEY 为空时，也可以使用 DEEPSEEK_API_KEY 作为兜底。
 
-### CORS allowlist
+### CORS 白名单
 
-- Configure `CORS_ALLOW_ORIGINS` in `backend/.env` as comma-separated origins.
-- Default template value is local frontend dev origins only.
+- 在 backend/.env 中配置 `CORS_ALLOW_ORIGINS`，用逗号分隔。
+- 默认包含常见本地开发端口与 `null`（用于 file:// 本地打开页面的场景）。
 
-## Open-source safety checklist
+## 开源安全清单
 
-- Never commit any API keys (Claude, Fish Audio, OpenAI, etc.).
-- Keep real credentials only in local .env files.
-- Commit only backend/.env.example as a template.
-- Keep personal memory files local, such as backend/memory/taste.md.
-- Before pushing, run git status and confirm no sensitive files are staged.
+- 不要提交任何 API Key（Claude/Fish Audio/OpenAI 等）。
+- 真实凭据仅保留在本地 .env。
+- 只提交 backend/.env.example 作为模板。
+- 个人记忆文件保持本地，例如 backend/memory/taste.md。
+- 推送前运行 git status，确认没有敏感文件被暂存。
 
-Detailed runbook:
+详细运行手册：
 
 - docs/security-playbook.md
 
-Pre-push scanner:
+提交前扫描：
 
-- VS Code Task: Scan Secrets (Tracked Files)
+- VS Code 任务：Scan Secrets (Tracked Files)
 
-Pre-commit protection:
+Pre-commit 保护：
 
-- VS Code Task: Install Git Hooks (run once per clone)
-- Hook file: .githooks/pre-commit
+- VS Code 任务：Install Git Hooks（每个仓库只需执行一次）
+- Hook 文件：.githooks/pre-commit
 
-## Initial API routes
+## 初始 API 路由
 
 - GET /health
 - GET /ready
 - POST /v1/agent/respond
-   - reply is a strict JSON object with keys:
+   - reply 为严格 JSON 对象，包含字段：
       - analysis: string
       - answer: string
       - actions: string[]
       - provider: string
       - model: string
 
-## Iteration plan
+## 后续迭代计划
 
-- Connect real LLM provider in backend/agent/llm_client.py
-- Implement NetEase, weather, and TTS tools under backend/tools
-- Build frontend pages and connect API
-- Expand docs with diagrams and sequence flows
+- 在 backend/agent/llm_client.py 中接入真实模型调用
+- 在 backend/tools 中实现 NetEase、天气与 TTS 工具
+- 构建前端界面并接入 API
+- 扩展架构文档与时序图

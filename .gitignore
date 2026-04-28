@@ -22,6 +22,7 @@ backend/memory/*.md
 !backend/memory/README.md
 backend/qrcode.png
 backend/memory/memory_update.log
+backend/memory/user_profile.json
 
 # Frontend
 node_modules/

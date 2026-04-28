@@ -26,7 +26,8 @@ class AssistantService:
 
         while True:
             prompt = build_prompt(working_input, merged_context)
-            reply = call_llm(prompt, model="deepseek-chat")
+            #reply = call_llm(prompt, model="deepseek-chat")
+            reply = call_llm(prompt)
             final_reply = self._attach_music_result(reply)
 
             tool_error = self._extract_unplayable_music_error(final_reply)

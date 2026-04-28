@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import os
 
 from dotenv import load_dotenv
 
@@ -12,7 +13,7 @@ from backend.agent.prompt_builder import build_memory_observer_messages
 
 
 logger = logging.getLogger(__name__)
-SLOW_CRITIC_MODEL = "deepseek-reasoner"
+SLOW_CRITIC_MODEL = os.getenv("MEMORY_MODEL", "deepseek-reasoner")
 
 
 class MemoryManager:

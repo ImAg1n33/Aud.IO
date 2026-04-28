@@ -26,7 +26,6 @@ def test_generate_reply_injects_profile(monkeypatch) -> None:
 
     def fake_call_llm(prompt: str, model: str | None = None):
         assert prompt == "PROMPT"
-        assert model == "deepseek-chat"
         return {
             "analysis": "analysis",
             "answer": "answer",
@@ -67,7 +66,6 @@ def test_generate_reply_retries_on_unplayable_music(monkeypatch) -> None:
 
     def fake_call_llm(prompt: str, model: str | None = None):
         assert prompt == "PROMPT"
-        assert model == "deepseek-chat"
         return {
             "analysis": "analysis",
             "answer": "answer",

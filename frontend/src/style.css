@@ -1,0 +1,182 @@
+@import url('https://fonts.googleapis.com/css2?family=DotGothic16&display=swap');
+
+:root {
+    --bg-color: #000000;
+    --fg-color: #ffffff;
+    --accent-red: #ea3323;
+    --dim-gray: #333333;
+}
+
+body {
+    background-color: var(--bg-color);
+    color: var(--fg-color);
+    font-family: 'DotGothic16', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    margin: 0;
+    user-select: none;
+}
+
+.container {
+    width: 90%;
+    max-width: 700px;
+}
+
+/* 顶部 Logo */
+.header {
+    font-size: 4rem;
+    color: var(--accent-red);
+    letter-spacing: 10px;
+    margin-bottom: 2rem;
+    text-shadow: 2px 2px 0px rgba(255, 0, 0, 0.3);
+}
+
+/* AI 状态展示区 */
+.display-box {
+    border: 2px solid var(--dim-gray);
+    padding: 20px;
+    min-height: 120px;
+    font-size: 1.5rem;
+    margin-bottom: 30px;
+    position: relative;
+    background: repeating-linear-gradient(
+        0deg,
+        rgba(0,0,0,0.15),
+        rgba(0,0,0,0.15) 1px,
+        transparent 1px,
+        transparent 2px
+    ); 
+}
+
+/* 输入区 */
+.input-group {
+    display: flex;
+    gap: 15px;
+}
+
+input {
+    flex: 1;
+    background: transparent;
+    border: 2px solid var(--fg-color);
+    color: var(--fg-color);
+    font-family: inherit;
+    font-size: 1.5rem;
+    padding: 15px;
+    outline: none;
+}
+
+input:focus {
+    border-color: var(--accent-red);
+}
+
+button {
+    background: var(--fg-color);
+    color: var(--bg-color);
+    border: none;
+    padding: 0 40px;
+    font-family: inherit;
+    font-size: 1.5rem;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+}
+
+button:hover {
+    background: var(--accent-red);
+    color: var(--fg-color);
+}
+
+button:disabled {
+    background: var(--dim-gray);
+    color: #666;
+    cursor: not-allowed;
+}
+
+/* 音乐播放器面板 */
+.player-panel {
+    margin-top: 30px;
+    border-top: 2px dashed var(--dim-gray);
+    padding-top: 20px;
+}
+
+.track-info {
+    font-size: 2rem;
+    color: var(--accent-red);
+    animation: marquee 10s linear infinite;
+    white-space: nowrap;
+}
+
+/* 闪烁的光标 */
+.cursor {
+    display: inline-block;
+    width: 15px;
+    height: 1.2rem;
+    background-color: var(--accent-red);
+    animation: blink 1s step-end infinite;
+    vertical-align: text-bottom;
+}
+
+/* 神经监控面板 */
+.debug-panel {
+    width: 100%;
+    margin-top: 20px;
+    padding: 15px;
+    background: rgba(234, 51, 35, 0.05);
+    border: 1px solid var(--accent-red);
+    font-size: 1rem;
+    color: var(--accent-red);
+    overflow-y: auto;
+    max-height: 200px;
+}
+
+.debug-panel pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+/* --- 新增：播放器控制台样式 --- */
+.control-board {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 1px dashed var(--dim-gray);
+}
+
+.ctrl-btn {
+    background: transparent;
+    color: var(--accent-red);
+    border: 1px solid var(--accent-red);
+    padding: 5px 15px;
+    font-size: 1.2rem;
+}
+
+.ctrl-btn:hover {
+    background: var(--accent-red);
+    color: var(--bg-color);
+}
+
+.play-btn {
+    font-weight: bold;
+    min-width: 120px;
+}
+
+.mode-btn {
+    color: var(--fg-color);
+    border-color: var(--fg-color);
+    margin-right: auto; /* 把模式按钮推到最左边 */
+}
+
+.mode-btn:hover {
+    background: var(--fg-color);
+    color: var(--bg-color);
+}
+
+@keyframes blink { 50% { opacity: 0; } }

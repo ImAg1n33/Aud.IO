@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aud.IO - Terminal</title>
+    <link href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #000000;
+            --fg-color: #ffffff;
+            --accent-red: #ea3323;
+            --dim-gray: #333333;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--fg-color);
+            font-family: 'DotGothic16', monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            user-select: none;
+        }
+
+        .container {
+            width: 90%;
+            max-width: 700px;
+        }
+
+        /* 顶部 Logo */
+        .header {
+            font-size: 4rem;
+            color: var(--accent-red);
+            letter-spacing: 10px;
+            margin-bottom: 2rem;
+            text-shadow: 2px 2px 0px rgba(255, 0, 0, 0.3);
+        }
+
+        /* AI 状态展示区 */
+        .display-box {
+            border: 2px solid var(--dim-gray);
+            padding: 20px;
+            min-height: 120px;
+            font-size: 1.5rem;
+            margin-bottom: 30px;
+            position: relative;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0,0,0,0.15),
+                rgba(0,0,0,0.15) 1px,
+                transparent 1px,
+                transparent 2px
+            ); /* 模拟老式 CRT 屏幕扫描线 */
+        }
+
+        /* 输入区 */
+        .input-group {
+            display: flex;
+            gap: 15px;
+        }
+
+        input {
+            flex: 1;
+            background: transparent;
+            border: 2px solid var(--fg-color);
+            color: var(--fg-color);
+            font-family: inherit;
+            font-size: 1.5rem;
+            padding: 15px;
+            outline: none;
+        }
+
+        input:focus {
+            border-color: var(--accent-red);
+        }
+
+        button {
+            background: var(--fg-color);
+            color: var(--bg-color);
+            border: none;
+            padding: 0 40px;
+            font-family: inherit;
+            font-size: 1.5rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-transform: uppercase;
+        }
+
+        button:hover {
+            background: var(--accent-red);
+            color: var(--fg-color);
+        }
+
+        button:disabled {
+            background: var(--dim-gray);
+            color: #666;
+            cursor: not-allowed;
+        }
+
+        /* 隐藏的音乐播放器面板 */
+        .player-panel {
+            margin-top: 30px;
+            display: none;
+            border-top: 2px dashed var(--dim-gray);
+            padding-top: 20px;
+        }
+
+        .track-info {
+            font-size: 2rem;
+            color: var(--accent-red);
+            animation: marquee 10s linear infinite;
+            white-space: nowrap;
+        }
+
+        /* 闪烁的光标 */
+        .cursor {
+            display: inline-block;
+            width: 15px;
+            height: 1.2rem;
+            background-color: var(--accent-red);
+            animation: blink 1s step-end infinite;
+            vertical-align: text-bottom;
+        }
+
+        /* 神经监控面板 */
+        .debug-panel {
+            width: 100%;
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(234, 51, 35, 0.05);
+            border: 1px solid var(--accent-red);
+            font-size: 1rem;
+            color: var(--accent-red);
+            overflow-y: auto;
+            max-height: 200px;
+            display: none;
+        }
+        .debug-panel pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        @keyframes blink { 50% { opacity: 0; } }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">Aud.IO</div>
+
+    <div class="display-box">
+        <span id="responseText">> SYSTEM READY. AWAITING COMMAND.</span><span class="cursor"></span>
+    </div>
+
+    <div class="input-group">
+        <input type="text" id="userInput" placeholder="TYPE YOUR REQUEST..." autocomplete="off">
+        <button id="sendBtn" onclick="sendCommand()">EXECUTE</button>
+    </div>
+
+    <div class="player-panel" id="playerPanel">
+        <div style="font-size: 1.2rem; color: #888; margin-bottom: 5px;">NOW PLAYING:</div>
+        <div class="track-info" id="trackName">///</div>
+        <audio id="audioElement"></audio>
+    </div>
+
+    <div class="debug-panel" id="debugPanel">
+        <div style="font-size: 0.9rem; margin-bottom: 10px; border-bottom: 1px solid var(--accent-red); padding-bottom: 5px;">[ RAW DATA DUMP ]</div>
+        <pre id="jsonDump"></pre>
+    </div>
+</div>
+
+<script>
+    // 💡 核心新增：全局记忆变量，用于记录当前正在播放的歌曲
+    let currentPlayingTrack = "None";
+
+    // 监听回车键发送
+    document.getElementById("userInput").addEventListener("keypress", function(event) {
+        if (event.key === "Enter") sendCommand();
+    });
+
+    async function sendCommand() {
+        const inputObj = document.getElementById("userInput");
+        const btnObj = document.getElementById("sendBtn");
+        const displayObj = document.getElementById("responseText");
+        const playerPanel = document.getElementById("playerPanel");
+        const trackName = document.getElementById("trackName");
+        const audio = document.getElementById("audioElement");
+
+        const text = inputObj.value.trim();
+        if (!text) return;
+
+        // UI 状态切换为“思考中”
+        inputObj.value = "";
+        btnObj.disabled = true;
+        btnObj.innerText = "PROCESSING";
+        displayObj.style.color = "#888";
+        displayObj.innerText = "> TRANSMITTING DATA TO LLM CORE...\n> SEARCHING DATABASE...";
+        playerPanel.style.display = "none";
+        audio.pause();
+
+        try {
+            // 向本地 FastAPI 发送请求
+            const response = await fetch("http://127.0.0.1:8001/v1/agent/respond", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    user_input: text,
+                    // 💡 核心修复：把当前的歌曲塞进请求上下文里发给后端！
+                    context: {
+                        "Currently Playing": currentPlayingTrack
+                    }
+                })
+            });
+
+            if (!response.ok) throw new Error("SERVER REJECTED CONNECTION.");
+
+            const data = await response.json();
+            const reply = data.reply;
+
+            // 将原始 JSON 数据格式化并打印到监控面板
+            document.getElementById("jsonDump").innerText = JSON.stringify(data, null, 2);
+            document.getElementById("debugPanel").style.display = "block";
+
+            // 恢复 UI 颜色并打字机输出结果
+            displayObj.style.color = "#ffffff";
+            displayObj.innerText = "> " + (reply.say || "TASK COMPLETED.");
+
+            // 检查是否有音乐要播放
+            if (reply.music && reply.music.mp3_url) {
+                audio.src = reply.music.mp3_url;
+                audio.play(); 
+                
+                // 💡 核心修复：把大模型返回的真正歌名存进记忆里，留给下一次对话使用
+                currentPlayingTrack = `${reply.music.artist} - ${reply.music.name}`;
+                
+                trackName.innerText = `♪ ${reply.music.name} - ${reply.music.artist} ♪`;
+                playerPanel.style.display = "block";
+            }
+
+        } catch (error) {
+            displayObj.style.color = "var(--accent-red)";
+            displayObj.innerText = "> CRITICAL ERROR: " + error.message;
+        } finally {
+            // 恢复按钮
+            btnObj.disabled = false;
+            btnObj.innerText = "EXECUTE";
+            inputObj.focus();
+        }
+    }
+</script>
+
+</body>
+</html>

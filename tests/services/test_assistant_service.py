@@ -1,6 +1,6 @@
+import pytest
 from fastapi import BackgroundTasks
 
-import backend.services.assistant_service as assistant_service_module
 from backend.services.assistant_service import AssistantService
 
 
@@ -13,148 +13,169 @@ class StubMemoryManager:
             "last_updated": "2026-04-24T00:00:00Z",
         }
 
+    def get_preference_summary(self) -> str:
+        return "Preferred genres: lofi."
+
     async def async_update_profile(self, user_input: str, assistant_reply: str):
         return {"ok": True, "user_input": user_input, "assistant_reply": assistant_reply}
 
 
-def test_generate_reply_injects_profile(monkeypatch) -> None:
-    captured: dict = {}
+class StubEpisodicMemory:
+    async def store_snapshot(self, *args, **kwargs):
+        return 1
 
-    def fake_build_prompt(user_input: str, context: dict):
-        captured["context"] = context
-        return "PROMPT"
-
-    def fake_call_llm(prompt: str, model: str | None = None):
-        assert prompt == "PROMPT"
-        return {
-            "analysis": "analysis",
-            "answer": "answer",
-            "actions": [],
-            "play_keyword": "",
-            "provider": "deepseek",
-            "model": "deepseek-chat",
-        }
-
-    monkeypatch.setattr(assistant_service_module, "build_prompt", fake_build_prompt)
-    monkeypatch.setattr(assistant_service_module, "call_llm", fake_call_llm)
-
-    service = AssistantService(memory_manager=StubMemoryManager())
-    reply, prompt = service.generate_reply("hi", {"scene": "unit"})
-
-    assert prompt == "PROMPT"
-    assert reply["answer"] == "answer"
-    assert captured["context"]["scene"] == "unit"
-    assert captured["context"]["user_profile"]["core_taste"] == ["lofi"]
+    async def query_recent(self, limit=10):
+        return []
 
 
-def test_schedule_profile_update_registers_background_task() -> None:
-    service = AssistantService(memory_manager=StubMemoryManager())
-    bg = BackgroundTasks()
-    service.schedule_profile_update(bg, "hello", {"answer": "ok"})
+@pytest.fixture
+def service(tmp_path):
+    svc = AssistantService(
+        memory_manager=StubMemoryManager(),
+        episodic_db_path=tmp_path / "episodes.db",
+    )
+    return svc
 
-    assert len(bg.tasks) == 1
-    task = bg.tasks[0]
-    assert task.func.__name__ == "async_update_profile"
 
-
-def test_generate_reply_retries_on_unplayable_music(monkeypatch) -> None:
-    prompts: list[str] = []
-
-    def fake_build_prompt(user_input: str, context: dict):
-        prompts.append(user_input)
-        return "PROMPT"
-
-    def fake_call_llm(prompt: str, model: str | None = None):
-        assert prompt == "PROMPT"
-        return {
-            "analysis": "analysis",
-            "answer": "answer",
-            "actions": [{"type": "play_music", "keyword": "kw"}],
-            "play_keyword": "kw",
-            "provider": "deepseek",
-            "model": "deepseek-chat",
-        }
-
-    attach_results = iter(
-        [
-            {
-                "analysis": "analysis",
-                "answer": "answer",
-                "actions": [{"type": "play_music", "keyword": "kw"}],
-                "play_keyword": "kw",
-                "provider": "deepseek",
-                "model": "deepseek-chat",
-                "music": {"requested_keyword": "kw", "error": "No playable url found for song_id: 1"},
-            },
-            {
-                "analysis": "analysis",
-                "answer": "ok",
+class TestGenerateReply:
+    @pytest.mark.asyncio
+    async def test_injects_profile_for_music_intent(self, service, monkeypatch) -> None:
+        def fake_call_llm(prompt: str, model: str | None = None):
+            assert "lofi" in prompt or "Preferred genres" in prompt
+            return {
+                "analysis": "ok",
+                "answer": "done",
                 "actions": [],
                 "play_keyword": "",
-                "provider": "deepseek",
-                "model": "deepseek-chat",
-                "music": {
-                    "requested_keyword": "safe",
-                    "song_id": "2",
-                    "name": "Safe Song",
-                    "artist": "Safe Artist",
-                    "mp3_url": "https://example.com/a.mp3",
-                },
-            },
-        ]
-    )
+                "provider": "test",
+                "model": "test",
+            }
 
-    monkeypatch.setattr(assistant_service_module, "build_prompt", fake_build_prompt)
-    monkeypatch.setattr(assistant_service_module, "call_llm", fake_call_llm)
+        monkeypatch.setattr(
+            "backend.services.assistant_service.call_llm", fake_call_llm
+        )
 
-    service = AssistantService(memory_manager=StubMemoryManager())
-    monkeypatch.setattr(service, "_attach_music_result", lambda reply: next(attach_results))
+        # Must use music-related input to trigger UserPreferenceProvider
+        reply, prompt = await service.generate_reply("播放一首爵士乐", {"scene": "unit"})
+        assert reply["answer"] == "done"
+        assert prompt
 
-    reply, _ = service.generate_reply("来点歌", {"scene": "unit"})
+    @pytest.mark.asyncio
+    async def test_chitchat_skips_profile(self, service, monkeypatch) -> None:
+        def fake_call_llm(prompt: str, model: str | None = None):
+            # Profile should NOT be injected for chitchat
+            assert "How to use this profile" not in prompt
+            return {
+                "analysis": "ok",
+                "answer": "hello",
+                "actions": [],
+                "play_keyword": "",
+                "provider": "test",
+                "model": "test",
+            }
 
-    assert reply["music"]["name"] == "Safe Song"
-    assert len(prompts) == 2
-    assert "系统提示：刚才你推荐的歌曲" in prompts[1]
+        monkeypatch.setattr(
+            "backend.services.assistant_service.call_llm", fake_call_llm
+        )
+
+        reply, prompt = await service.generate_reply("hi", {})
+        assert reply["answer"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_records_short_term_memory(self, service, monkeypatch) -> None:
+        def fake_call_llm(prompt: str, model: str | None = None):
+            return {
+                "analysis": "ok",
+                "answer": "test answer",
+                "actions": [],
+                "play_keyword": "",
+                "provider": "test",
+                "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.call_llm", fake_call_llm
+        )
+
+        await service.generate_reply("hello", {})
+        last_msg = service.short_term_memory.get_last_user_message()
+        assert last_msg == "hello"
+
+    @pytest.mark.asyncio
+    async def test_retries_on_tool_error(self, service, monkeypatch) -> None:
+        call_count = {"val": 0}
+
+        def fake_call_llm(prompt: str, model: str | None = None):
+            call_count["val"] += 1
+            return {
+                "analysis": "ok",
+                "answer": "playing music",
+                "actions": [{"tool": "search_music", "keyword": "test"}],
+                "play_keyword": "test",
+                "provider": "test",
+                "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.call_llm", fake_call_llm
+        )
+
+        # Make ToolExecutor always fail with retry context
+        class FakeFailExecutor:
+            async def execute_actions(self, actions):
+                from backend.tools.base import MusicCopyrightError, ToolResult
+                return [
+                    ToolResult.fail(
+                        MusicCopyrightError("copyright"),
+                        data={"name": "Blocked Song"},
+                        retry_context="copyright blocked",
+                    )
+                ]
+
+        service.tool_executor = FakeFailExecutor()
+
+        reply, _ = await service.generate_reply("play something", {})
+        # Should retry MAX_RETRIES times, then fall back
+        assert call_count["val"] == 3  # initial + 2 retries
+
+    @pytest.mark.asyncio
+    async def test_graceful_degradation_after_retries(self, service, monkeypatch) -> None:
+        def fake_call_llm(prompt: str, model: str | None = None):
+            return {
+                "analysis": "ok",
+                "answer": "playing",
+                "actions": [{"tool": "search_music", "keyword": "test"}],
+                "play_keyword": "test",
+                "provider": "test",
+                "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.call_llm", fake_call_llm
+        )
+
+        class AlwaysCopyrightExecutor:
+            async def execute_actions(self, actions):
+                from backend.tools.base import MusicCopyrightError, ToolResult
+                return [
+                    ToolResult.fail(
+                        MusicCopyrightError("copyright"),
+                        retry_context="blocked",
+                    )
+                ]
+
+        service.tool_executor = AlwaysCopyrightExecutor()
+
+        reply, _ = await service.generate_reply("play something", {})
+        assert "Sorry" in reply["answer"] or "抱歉" in reply["answer"] or "copyright" in reply.get("answer", "")
+        assert reply["play_keyword"] == ""
+        assert "music" not in reply
 
 
-def test_generate_reply_graceful_degradation_after_retries(monkeypatch) -> None:
-    call_count = {"value": 0}
-
-    def fake_build_prompt(user_input: str, context: dict):
-        return "PROMPT"
-
-    def fake_call_llm(prompt: str, model: str | None = None):
-        call_count["value"] += 1
-        return {
-            "analysis": "analysis",
-            "answer": "answer",
-            "actions": [{"type": "play_music", "keyword": "kw"}],
-            "play_keyword": "kw",
-            "provider": "deepseek",
-            "model": "deepseek-chat",
-        }
-
-    def always_error(reply: dict):
-        return {
-            "analysis": "analysis",
-            "answer": "answer",
-            "actions": [{"type": "play_music", "keyword": "kw"}],
-            "play_keyword": "kw",
-            "provider": "deepseek",
-            "model": "deepseek-chat",
-            "music": {"requested_keyword": "kw", "error": "No playable url found for song_id: 1"},
-        }
-
-    monkeypatch.setattr(assistant_service_module, "build_prompt", fake_build_prompt)
-    monkeypatch.setattr(assistant_service_module, "call_llm", fake_call_llm)
-
-    service = AssistantService(memory_manager=StubMemoryManager())
-    monkeypatch.setattr(service, "_attach_music_result", always_error)
-
-    reply, _ = service.generate_reply("来点歌", {"scene": "unit"})
-
-    assert call_count["value"] == 3
-    assert "抱歉，我为您连续挑选了几首歌" in reply["answer"]
-    assert reply["say"] == reply["answer"]
-    assert reply["play_keyword"] == ""
-    assert "music" not in reply
+class TestScheduleProfileUpdate:
+    def test_registers_background_task(self, service) -> None:
+        bg = BackgroundTasks()
+        service.schedule_profile_update(bg, "hello", {"answer": "ok"})
+        assert len(bg.tasks) == 1
+        task = bg.tasks[0]
+        assert task.func.__name__ == "async_update_profile"

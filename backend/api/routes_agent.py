@@ -21,7 +21,7 @@ class AgentResponse(BaseModel):
 
 
 @router.post("/respond", response_model=AgentResponse)
-def agent_respond(payload: AgentRequest, background_tasks: BackgroundTasks) -> AgentResponse:
-    final_reply, prompt = assistant_service.generate_reply(payload.user_input, payload.context)
+async def agent_respond(payload: AgentRequest, background_tasks: BackgroundTasks) -> AgentResponse:
+    final_reply, prompt = await assistant_service.generate_reply(payload.user_input, payload.context)
     assistant_service.schedule_profile_update(background_tasks, payload.user_input, final_reply)
     return AgentResponse(reply=final_reply, prompt=prompt)

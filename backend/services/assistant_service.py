@@ -1,46 +1,111 @@
+"""Agent orchestration: Perceive -> Decide -> Execute -> Record pipeline."""
+
+import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
+from backend.agent.context_assembler import (
+    ContextAssembler,
+    ConversationHistoryProvider,
+    CurrentlyPlayingProvider,
+    EpisodicMemoryProvider,
+    ToolSchemaProvider,
+    UserPreferenceProvider,
+)
+from backend.agent.intent_classifier import IntentClassifier
 from backend.agent.llm_client import call_llm
 from backend.agent.memory_manager import MemoryManager
-from backend.agent.prompt_builder import build_prompt
-from backend.tools.netease_api import get_song_mp3_url, search_first_song
+from backend.agent.prompt_builder import ENHANCED_SYSTEM_PERSONA, ENHANCED_TOOL_CONSTRAINTS
+from backend.agent.tool_executor import ToolExecutor
+from backend.memory.conversation_memory import ConversationMemory
+from backend.memory.episodic_memory import EpisodicMemory
 
 
 class AssistantService:
     MAX_RETRIES = 2
 
-    def __init__(self, memory_manager: MemoryManager | None = None) -> None:
+    def __init__(
+        self,
+        memory_manager: MemoryManager | None = None,
+        episodic_db_path: Path | None = None,
+    ) -> None:
+        backend_root = Path(__file__).resolve().parents[1]
         self.memory_manager = memory_manager or MemoryManager()
+        self.short_term_memory = ConversationMemory(max_turns=20)
+        self.episodic_memory = EpisodicMemory(
+            episodic_db_path or (backend_root / "memory" / "episodes.db")
+        )
+        self.intent_classifier = IntentClassifier()
+        self.tool_executor = ToolExecutor(max_retries=self.MAX_RETRIES)
+        self.context_assembler = ContextAssembler(
+            providers=[
+                ConversationHistoryProvider(self.short_term_memory),
+                UserPreferenceProvider(self.memory_manager),
+                CurrentlyPlayingProvider(),
+                ToolSchemaProvider(),
+                EpisodicMemoryProvider(self.episodic_memory),
+            ],
+            system_persona=ENHANCED_SYSTEM_PERSONA,
+            tool_constraints=ENHANCED_TOOL_CONSTRAINTS,
+        )
 
-    def generate_reply(self, user_input: str, context: dict[str, Any] | None) -> tuple[dict[str, Any], str]:
-        merged_context: dict[str, Any] = dict(context or {})
+    async def generate_reply(
+        self, user_input: str, context: dict[str, Any] | None
+    ) -> tuple[dict[str, Any], str]:
+        """Perceive -> Decide -> Execute -> Record pipeline.
 
-        try:
-            merged_context["user_profile"] = self.memory_manager.get_profile()
-        except Exception as exc:
-            merged_context["user_profile_error"] = str(exc)
+        Returns (reply_dict, prompt_string) — same contract as before.
+        """
+        # === PERCEIVE ===
+        intent = self.intent_classifier.classify(user_input)
+        metadata: dict[str, Any] = dict(context or {})
 
+        prompt = await self.context_assembler.assemble(user_input, intent, metadata)
+
+        # === DECIDE + EXECUTE (with retry loop) ===
         working_input = user_input
         retry_count = 0
 
         while True:
-            prompt = build_prompt(working_input, merged_context)
-            #reply = call_llm(prompt, model="deepseek-chat")
-            reply = call_llm(prompt)
-            final_reply = self._attach_music_result(reply)
+            reply = await asyncio.to_thread(call_llm, prompt)
 
-            tool_error = self._extract_unplayable_music_error(final_reply)
-            if not tool_error:
-                return final_reply, prompt
+            actions = self._parse_actions_from_reply(reply)
+            results = await self.tool_executor.execute_actions(actions)
+            final_reply = self._merge_tool_results(reply, results)
+
+            retry_contexts = self._collect_retry_contexts(results)
+            if not retry_contexts:
+                break
 
             if retry_count >= self.MAX_RETRIES:
-                degraded = self._build_graceful_music_fallback(final_reply)
-                return degraded, prompt
+                final_reply = self._build_graceful_fallback(final_reply)
+                break
 
             retry_count += 1
-            feedback = self._build_music_recovery_feedback(final_reply)
-            working_input = f"{user_input}\n\n{feedback}"
+            feedback = self._build_retry_feedback(final_reply, retry_contexts)
+            working_input = f"{user_input}\n\n[System: {feedback}]"
+            prompt = await self.context_assembler.assemble(working_input, intent, metadata)
+
+        # === RECORD ===
+        played_song = final_reply.get("music")
+        self.short_term_memory.add_turn(
+            user_input,
+            final_reply.get("answer", ""),
+            intent=str(intent),
+            played_song=played_song,
+        )
+
+        # Fire-and-forget episodic storage (don't block the response)
+        asyncio.ensure_future(
+            self.episodic_memory.store_snapshot(
+                user_input,
+                final_reply.get("answer", ""),
+                played_song=played_song,
+            )
+        )
+
+        return final_reply, prompt
 
     def schedule_profile_update(
         self,
@@ -48,125 +113,98 @@ class AssistantService:
         user_input: str,
         final_reply: dict[str, Any],
     ) -> None:
+        """Schedule async profile update as a background task. Unchanged from before."""
         background_tasks.add_task(
             self.memory_manager.async_update_profile,
             user_input,
             json.dumps(final_reply, ensure_ascii=False),
         )
 
-    def _extract_play_keyword(self, reply: dict[str, Any]) -> str:
-        direct = reply.get("play_keyword")
-        if isinstance(direct, str) and direct.strip():
-            return direct.strip()
+    # ================================================================
+    # Helpers
+    # ================================================================
 
+    @staticmethod
+    def _parse_actions_from_reply(reply: dict[str, Any]) -> list[dict[str, Any]]:
+        """Extract tool action directives from LLM response."""
         actions = reply.get("actions", [])
         if not isinstance(actions, list):
-            return ""
+            return []
 
+        tool_actions: list[dict[str, Any]] = []
         for item in actions:
-            if isinstance(item, dict):
-                action_type = str(item.get("type", "")).strip().lower()
-                if action_type in {"play_music", "play_song", "music_search"}:
-                    keyword = item.get("keyword") or item.get("play_keyword")
-                    if isinstance(keyword, str) and keyword.strip():
-                        return keyword.strip()
+            if isinstance(item, dict) and "tool" in item:
+                tool_actions.append(item)
+        return tool_actions
+
+    @staticmethod
+    def _merge_tool_results(
+        reply: dict[str, Any], results: list[Any]
+    ) -> dict[str, Any]:
+        """Attach successful tool results to the reply dict."""
+        merged = dict(reply)
+        for result in results:
+            if not hasattr(result, "success"):
                 continue
+            if result.success and result.data:
+                if "song_id" in result.data and "mp3_url" not in result.data:
+                    # search_music result — attach as music data
+                    merged["music"] = {
+                        "requested_keyword": result.data.get("requested_keyword", ""),
+                        "song_id": result.data.get("song_id", ""),
+                        "name": result.data.get("name", ""),
+                        "artist": result.data.get("artist", ""),
+                    }
+                elif "mp3_url" in result.data:
+                    # get_music_url result — merge into existing music block
+                    if "music" in merged and isinstance(merged["music"], dict):
+                        merged["music"]["mp3_url"] = result.data.get("mp3_url", "")
+                    else:
+                        merged["music"] = result.data
+        return merged
 
-            if not isinstance(item, str):
-                continue
+    @staticmethod
+    def _collect_retry_contexts(results: list[Any]) -> list[str]:
+        """Collect retry feedback messages from tool execution results."""
+        contexts: list[str] = []
+        for result in results:
+            if hasattr(result, "metadata") and result.metadata.get("retry_context"):
+                contexts.append(str(result.metadata["retry_context"]))
+        return contexts
 
-            text = item.strip()
-            if not text:
-                continue
-
-            for prefix in ["play_music:", "play_song:", "music_search:", "play:", "播放:"]:
-                if text.lower().startswith(prefix.lower()):
-                    keyword = text[len(prefix) :].strip()
-                    if keyword:
-                        return keyword
-
-        return ""
-
-    def _attach_music_result(self, reply: dict[str, Any]) -> dict[str, Any]:
-        keyword = self._extract_play_keyword(reply)
-        if not keyword:
-            return reply
-
-        enriched = dict(reply)
-        try:
-            song = search_first_song(keyword)
-            mp3_url = get_song_mp3_url(song["id"])
-            enriched["music"] = {
-                "requested_keyword": keyword,
-                "song_id": song["id"],
-                "name": song["name"],
-                "artist": song["artist"],
-                "mp3_url": mp3_url,
-            }
-        except Exception as exc:
-            enriched["music"] = {
-                "requested_keyword": keyword,
-                "error": str(exc),
-            }
-        return enriched
-
-    def _extract_unplayable_music_error(self, reply: dict[str, Any]) -> str | None:
+    @staticmethod
+    def _build_retry_feedback(reply: dict[str, Any], retry_contexts: list[str]) -> str:
+        """Build feedback message for the LLM retry loop."""
         music = reply.get("music")
-        if not isinstance(music, dict):
-            return None
+        song_name = ""
+        if isinstance(music, dict):
+            song_name = music.get("name", "") or music.get("requested_keyword", "")
 
-        error = music.get("error")
-        if not isinstance(error, str) or not error.strip():
-            return None
+        target = song_name or "the requested song"
+        feedback = " ".join(retry_contexts)
+        if target and target not in feedback:
+            feedback = f"The song '{target}' could not be played. {feedback}"
+        return feedback
 
-        lowered = error.lower()
-        markers = [
-            "版权",
-            "copyright",
-            "no playable url",
-            "failed to fetch song url",
-            "无法播放",
-        ]
-        if any(marker in lowered for marker in markers):
-            return error.strip()
-        return None
-
-    def _build_music_recovery_feedback(self, reply: dict[str, Any]) -> str:
-        music = reply.get("music") if isinstance(reply.get("music"), dict) else {}
-        song_name = music.get("name") if isinstance(music, dict) else None
-        keyword = music.get("requested_keyword") if isinstance(music, dict) else None
-
-        target = "上一首歌"
-        if isinstance(song_name, str) and song_name.strip():
-            target = song_name.strip()
-        elif isinstance(keyword, str) and keyword.strip():
-            target = keyword.strip()
-
-        return (
-            f"系统提示：刚才你推荐的歌曲 {target} 因为版权限制无法播放。"
-            "请立刻重新推荐一首与之前完全不同、且大概率有免费版权的歌曲，并填入 play_keyword！"
-        )
-
-    def _build_graceful_music_fallback(self, reply: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _build_graceful_fallback(reply: dict[str, Any]) -> dict[str, Any]:
+        """Build a gracefully degraded reply after all retries exhausted."""
         degraded = dict(reply)
         degraded.pop("music", None)
         degraded["play_keyword"] = ""
 
-        fallback_text = "抱歉，我为您连续挑选了几首歌，都因为版权限制无法播放，请尝试更换一种风格或指定其他歌手。"
+        fallback_text = (
+            "Sorry, I picked several songs but all were blocked by copyright restrictions. "
+            "Please try a different style or specify a different artist."
+        )
         degraded["answer"] = fallback_text
         degraded["say"] = fallback_text
 
         actions = degraded.get("actions")
         if isinstance(actions, list):
-            filtered: list[Any] = []
-            for item in actions:
-                if isinstance(item, str) and "play" in item.lower():
-                    continue
-                if isinstance(item, dict):
-                    action_type = str(item.get("type", "")).strip().lower()
-                    if any(token in action_type for token in ["play", "music"]):
-                        continue
-                filtered.append(item)
-            degraded["actions"] = filtered
+            degraded["actions"] = [
+                item for item in actions
+                if not (isinstance(item, dict) and item.get("tool") in {"search_music", "get_music_url"})
+            ]
 
         return degraded

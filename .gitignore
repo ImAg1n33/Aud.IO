@@ -23,6 +23,7 @@ backend/memory/*.md
 backend/qrcode.png
 backend/memory/memory_update.log
 backend/memory/user_profile.json
+backend/memory/episodes.db
 
 # Frontend
 node_modules/

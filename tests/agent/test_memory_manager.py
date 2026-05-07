@@ -130,3 +130,143 @@ async def test_async_update_profile_empty_patch_does_not_overwrite_profile_file(
     assert persisted_text.strip() != ""
     assert json.loads(persisted_text) == original_profile
     assert updated == original_profile
+
+
+class TestPreferenceSummary:
+    def test_summary_includes_core_taste(self, tmp_path) -> None:
+        profile_path = tmp_path / "user_profile.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "core_taste": ["jazz", "pop"],
+                    "artist_preference": {"liked": [], "disliked": []},
+                    "mood_bias": {},
+                    "last_updated": "2026-01-01T00:00:00Z",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+        summary = manager.get_preference_summary()
+        assert "jazz, pop" in summary
+        assert "Preferred genres" in summary
+
+    def test_summary_includes_artist_constraints(self, tmp_path) -> None:
+        profile_path = tmp_path / "user_profile.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "core_taste": [],
+                    "artist_preference": {"liked": ["A"], "disliked": ["B"]},
+                    "mood_bias": {},
+                    "last_updated": "2026-01-01T00:00:00Z",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+        summary = manager.get_preference_summary()
+        assert "A" in summary
+        assert "Avoid these artists" in summary
+
+    def test_summary_includes_mood_bias(self, tmp_path) -> None:
+        profile_path = tmp_path / "user_profile.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "core_taste": [],
+                    "artist_preference": {"liked": [], "disliked": []},
+                    "mood_bias": {"happy": ["pop"], "sad": ["ballad"]},
+                    "last_updated": "2026-01-01T00:00:00Z",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+        summary = manager.get_preference_summary()
+        assert "happy → pop" in summary
+        assert "sad → ballad" in summary
+
+    def test_summary_empty_profile(self, tmp_path) -> None:
+        profile_path = tmp_path / "user_profile.json"
+        manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+        summary = manager.get_preference_summary()
+        assert "No music preferences" in summary
+
+
+class TestMoodRecommendations:
+    def test_returns_genres_for_known_mood(self, tmp_path) -> None:
+        profile_path = tmp_path / "user_profile.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "core_taste": [],
+                    "artist_preference": {"liked": [], "disliked": []},
+                    "mood_bias": {"focused": ["lofi", "ambient"], "calm": ["jazz"]},
+                    "last_updated": "2026-01-01T00:00:00Z",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+        assert manager.get_mood_recommendations("focused") == ["lofi", "ambient"]
+        assert manager.get_mood_recommendations("calm") == ["jazz"]
+
+    def test_case_insensitive(self, tmp_path) -> None:
+        profile_path = tmp_path / "user_profile.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "core_taste": [],
+                    "artist_preference": {"liked": [], "disliked": []},
+                    "mood_bias": {"Happy": ["pop"]},
+                    "last_updated": "2026-01-01T00:00:00Z",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+        assert manager.get_mood_recommendations("HAPPY") == ["pop"]
+
+    def test_unknown_mood_returns_empty(self, tmp_path) -> None:
+        profile_path = tmp_path / "user_profile.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "core_taste": [],
+                    "artist_preference": {"liked": [], "disliked": []},
+                    "mood_bias": {},
+                    "last_updated": "2026-01-01T00:00:00Z",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+        assert manager.get_mood_recommendations("nonexistent") == []
+
+
+class TestArtistConstraints:
+    def test_returns_liked_and_disliked(self, tmp_path) -> None:
+        profile_path = tmp_path / "user_profile.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "core_taste": [],
+                    "artist_preference": {"liked": ["A", "B"], "disliked": ["C"]},
+                    "mood_bias": {},
+                    "last_updated": "2026-01-01T00:00:00Z",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+        constraints = manager.get_artist_constraints()
+        assert constraints["liked"] == ["A", "B"]
+        assert constraints["disliked"] == ["C"]

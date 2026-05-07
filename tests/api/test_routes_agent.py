@@ -1,13 +1,15 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.api import routes_agent
 from backend.main import app
 
 
-def test_agent_respond_route_returns_json(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_agent_respond_route_returns_json(monkeypatch) -> None:
     captured: dict = {}
 
-    def fake_generate_reply(user_input: str, context: dict | None):
+    async def fake_generate_reply(user_input: str, context: dict | None):
         captured["generated"] = (user_input, context)
         return (
             {

@@ -91,6 +91,61 @@ class MemoryManager:
         )
         return updated_profile
 
+    def get_preference_summary(self) -> str:
+        """Produce an LLM-readable summary of the user profile for prompt injection."""
+        profile = self.get_profile()
+        parts: list[str] = []
+
+        core = profile.get("core_taste", [])
+        if core:
+            parts.append(f"Preferred genres: {', '.join(core)}.")
+
+        liked = profile.get("artist_preference", {}).get("liked", [])
+        if liked:
+            parts.append(f"Liked artists: {', '.join(liked)}.")
+
+        disliked = profile.get("artist_preference", {}).get("disliked", [])
+        if disliked:
+            parts.append(f"Avoid these artists: {', '.join(disliked)}.")
+
+        mood_bias = profile.get("mood_bias", {})
+        if mood_bias:
+            mood_lines = []
+            for mood, genres in mood_bias.items():
+                if genres:
+                    mood_lines.append(f"  {mood} → {', '.join(genres)}")
+            if mood_lines:
+                parts.append("Mood-to-genre mapping:\n" + "\n".join(mood_lines))
+
+        return "\n".join(parts) if parts else "No music preferences recorded yet."
+
+    def get_mood_recommendations(self, mood: str) -> list[str]:
+        """Get genre/artist recommendations from mood_bias for a given mood tag."""
+        if not mood:
+            return []
+        profile = self.get_profile()
+        mood_bias = profile.get("mood_bias", {})
+        if not isinstance(mood_bias, dict):
+            return []
+
+        mood_lower = mood.strip().lower()
+        for key, genres in mood_bias.items():
+            if key.lower() == mood_lower:
+                if isinstance(genres, list):
+                    return [str(g).strip() for g in genres if str(g).strip()]
+        return []
+
+    def get_artist_constraints(self) -> dict[str, list[str]]:
+        """Extract liked/disliked artist lists for prompt constraints."""
+        profile = self.get_profile()
+        prefs = profile.get("artist_preference", {})
+        if not isinstance(prefs, dict):
+            return {"liked": [], "disliked": []}
+        return {
+            "liked": self._coerce_string_list(prefs.get("liked", [])),
+            "disliked": self._coerce_string_list(prefs.get("disliked", [])),
+        }
+
     def _request_patch_from_model(
         self,
         user_input: str,

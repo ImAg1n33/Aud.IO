@@ -64,7 +64,7 @@ class TestGenerateReply:
     async def test_chitchat_skips_profile(self, service, monkeypatch) -> None:
         def fake_call_llm(prompt: str, model: str | None = None):
             # Profile should NOT be injected for chitchat
-            assert "How to use this profile" not in prompt
+            assert "User Music Profile" not in prompt
             return {
                 "analysis": "ok",
                 "answer": "hello",

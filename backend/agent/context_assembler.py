@@ -68,23 +68,14 @@ class UserPreferenceProvider(ContextProvider):
         if not summary and not stats_block:
             return None
 
-        lines = ["[User Music Profile — use this to personalize recommendations]"]
-
+        lines = ["[User Music Profile]"]
         if summary:
             lines.append(summary)
-            lines.append("")
-            lines.append("How to use this profile:")
-            lines.append("- If core_taste lists genres, prefer songs in those genres when the user is open-ended.")
-            lines.append("- If artist_preference has liked artists, mention/pick them when relevant.")
-            lines.append("- Avoid disliked artists and genres.")
-            lines.append("- If mood_bias is present and the user's mood or weather context matches a mood key, use those genres.")
 
         if stats_block:
             lines.append("")
             lines.append(stats_block)
-            lines.append("- Use the stats above to ground your picks in the user's actual listening history.")
 
-        lines.append("- Never say 'based on your profile' or 'I see you like' — just naturally pick fitting music.")
         return "\n".join(lines)
 
 
@@ -106,17 +97,9 @@ class ToolSchemaProvider(ContextProvider):
         if not schemas:
             return None
 
-        tool_desc = [
-            "Available tools (use in the 'actions' array as proper JSON objects):",
-            "  actions format: [{\"tool\": \"<tool_name>\", \"<param>\": \"<value>\"}]",
-            "  Each action is a JSON object with double-quoted keys — NOT a Python dict string!",
-            "  Example CORRECT: [{\"tool\": \"search_music\", \"keyword\": \"Miles Davis So What\"}]",
-            "",
-            "Available tool list:",
-        ]
+        tool_desc = ["[Available tools]"]
         for schema in schemas:
-            tool_desc.append(f"  - {schema['name']}: {schema['description']}")
-
+            tool_desc.append(f"- {schema['name']}: {schema['description']}")
         return "\n".join(tool_desc)
 
 

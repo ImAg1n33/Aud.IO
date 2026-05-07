@@ -74,7 +74,7 @@ class TestUserPreferenceProvider:
         result = await provider.get_context(Intent.MUSIC_PLAY, "play jazz", {})
         assert result is not None
         assert "jazz" in result
-        assert "How to use this profile" in result
+        assert "User Music Profile" in result
 
     @pytest.mark.asyncio
     async def test_returns_none_for_chitchat(self, stub_memory_manager) -> None:
@@ -199,5 +199,5 @@ class TestContextAssembler:
             metadata={},
         )
         assert "你好" in prompt
-        # Should NOT include profile instructions for chitchat
-        assert "How to use this profile" not in prompt
+        # Should NOT include profile data for chitchat
+        assert "User Music Profile" not in prompt

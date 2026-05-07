@@ -107,15 +107,16 @@ class ToolSchemaProvider(ContextProvider):
             return None
 
         tool_desc = [
-            "Available tools (use in the 'actions' array of your response):",
-            "Each action must be: {\"tool\": \"<tool_name>\", \"<param>\": \"<value>\", ...}",
+            "Available tools (use in the 'actions' array as proper JSON objects):",
+            "  actions format: [{\"tool\": \"<tool_name>\", \"<param>\": \"<value>\"}]",
+            "  Each action is a JSON object with double-quoted keys — NOT a Python dict string!",
+            "  Example CORRECT: [{\"tool\": \"search_music\", \"keyword\": \"Miles Davis So What\"}]",
+            "",
+            "Available tool list:",
         ]
         for schema in schemas:
             tool_desc.append(f"  - {schema['name']}: {schema['description']}")
 
-        tool_desc.append(
-            "Example: {\"tool\": \"search_music\", \"keyword\": \"Artist Song Title\"}"
-        )
         return "\n".join(tool_desc)
 
 

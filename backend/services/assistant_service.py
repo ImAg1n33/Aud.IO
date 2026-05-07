@@ -132,7 +132,12 @@ class AssistantService:
 
     @staticmethod
     def _parse_actions_from_reply(reply: dict[str, Any]) -> list[dict[str, Any]]:
-        """Extract tool action directives from LLM response."""
+        """Extract tool action directives from LLM response.
+
+        Accepts two formats (LLMs sometimes produce one or the other):
+        1. Proper JSON: {"tool": "search_music", "keyword": "..."}
+        2. String-encoded: "{'tool': 'search_music', 'keyword': '...'}"
+        """
         actions = reply.get("actions", [])
         if not isinstance(actions, list):
             return []
@@ -141,32 +146,74 @@ class AssistantService:
         for item in actions:
             if isinstance(item, dict) and "tool" in item:
                 tool_actions.append(item)
+                continue
+
+            # Try to parse string-encoded dict (common LLM output bug)
+            if isinstance(item, str):
+                stripped = item.strip()
+                # Try JSON first
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, dict) and "tool" in parsed:
+                        tool_actions.append(parsed)
+                        continue
+                except json.JSONDecodeError:
+                    pass
+                # Try Python dict repr: {'tool': 'search_music', ...}
+                try:
+                    import ast
+                    parsed = ast.literal_eval(stripped)
+                    if isinstance(parsed, dict) and "tool" in parsed:
+                        tool_actions.append(parsed)
+                        continue
+                except (ValueError, SyntaxError):
+                    pass
+
         return tool_actions
 
     @staticmethod
     def _merge_tool_results(
         reply: dict[str, Any], results: list[Any]
     ) -> dict[str, Any]:
-        """Attach successful tool results to the reply dict."""
+        """Attach successful tool results to the reply dict.
+
+        When a search_music result is found without a follow-up get_music_url,
+        automatically resolve the mp3_url via synchronous call.
+        """
+        from backend.tools.netease_api import get_song_mp3_url
+
         merged = dict(reply)
         for result in results:
             if not hasattr(result, "success"):
                 continue
-            if result.success and result.data:
-                if "song_id" in result.data and "mp3_url" not in result.data:
-                    # search_music result — attach as music data
-                    merged["music"] = {
-                        "requested_keyword": result.data.get("requested_keyword", ""),
-                        "song_id": result.data.get("song_id", ""),
-                        "name": result.data.get("name", ""),
-                        "artist": result.data.get("artist", ""),
-                    }
-                elif "mp3_url" in result.data:
-                    # get_music_url result — merge into existing music block
-                    if "music" in merged and isinstance(merged["music"], dict):
-                        merged["music"]["mp3_url"] = result.data.get("mp3_url", "")
-                    else:
-                        merged["music"] = result.data
+            if not result.success:
+                continue
+            if not result.data:
+                continue
+
+            if "song_id" in result.data and "mp3_url" not in result.data:
+                # search_music result — attach as music data
+                merged["music"] = {
+                    "requested_keyword": result.data.get("requested_keyword", ""),
+                    "song_id": result.data.get("song_id", ""),
+                    "name": result.data.get("name", ""),
+                    "artist": result.data.get("artist", ""),
+                }
+                # Auto-resolve MP3 URL
+                sid = result.data.get("song_id", "")
+                if sid:
+                    try:
+                        mp3_url = get_song_mp3_url(str(sid))
+                        merged["music"]["mp3_url"] = mp3_url
+                    except Exception:
+                        merged["music"]["mp3_url"] = ""
+
+            elif "mp3_url" in result.data:
+                if "music" in merged and isinstance(merged["music"], dict):
+                    merged["music"]["mp3_url"] = result.data.get("mp3_url", "")
+                else:
+                    merged["music"] = result.data
+
         return merged
 
     @staticmethod

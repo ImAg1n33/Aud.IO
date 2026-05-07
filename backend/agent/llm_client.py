@@ -51,7 +51,7 @@ def _request_chat_json(
         method="POST",
     )
 
-    with urlopen(req, timeout=60) as resp:
+    with urlopen(req, timeout=30) as resp:
         raw = resp.read().decode("utf-8")
     completion = json.loads(raw)
     content = completion["choices"][0]["message"]["content"]

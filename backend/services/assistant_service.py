@@ -94,22 +94,24 @@ class AssistantService:
             prompt = await self.context_assembler.assemble(working_input, intent, metadata)
 
         # === RECORD ===
-        played_song = final_reply.get("music")
-        self.short_term_memory.add_turn(
-            user_input,
-            final_reply.get("answer", ""),
-            intent=str(intent),
-            played_song=played_song,
-        )
-
-        # Fire-and-forget episodic storage (don't block the response)
-        asyncio.ensure_future(
-            self.episodic_memory.store_snapshot(
+        # Don't record error responses — they pollute conversation history
+        if final_reply.get("analysis") != "Model call failed.":
+            played_song = final_reply.get("music")
+            self.short_term_memory.add_turn(
                 user_input,
                 final_reply.get("answer", ""),
+                intent=str(intent),
                 played_song=played_song,
             )
-        )
+
+            # Fire-and-forget episodic storage (don't block the response)
+            asyncio.ensure_future(
+                self.episodic_memory.store_snapshot(
+                    user_input,
+                    final_reply.get("answer", ""),
+                    played_song=played_song,
+                )
+            )
 
         return final_reply, prompt
 

@@ -2,13 +2,13 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes_agent import router as agent_router
-
-
-load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 app = FastAPI(title="Aud.IO API", version="0.1.0")

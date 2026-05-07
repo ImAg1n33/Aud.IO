@@ -10,6 +10,13 @@ from dotenv import load_dotenv
 
 from backend.agent.llm_client import request_json_object
 from backend.agent.prompt_builder import build_memory_observer_messages
+from backend.memory.profile_schema import (
+    UserProfile,
+    atomic_write_json,
+    load_profile,
+    _utc_now_iso,
+    _coerce_string_list,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -29,29 +36,14 @@ class MemoryManager:
         load_dotenv(self.env_path)
 
     def get_profile(self) -> dict[str, Any]:
-        """Synchronously read user_profile.json from disk."""
-        if not self.profile_path.exists():
-            default_profile = self._default_profile()
-            self.profile_path.parent.mkdir(parents=True, exist_ok=True)
-            self.profile_path.write_text(
-                json.dumps(default_profile, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            return default_profile
-
-        raw = self.profile_path.read_text(encoding="utf-8")
-        profile = json.loads(raw)
-        if not isinstance(profile, dict):
-            raise ValueError("user_profile.json must be a JSON object.")
-        normalized = self._normalize_profile_schema(profile)
-        return normalized
+        """Synchronously read and validate user_profile.json. Returns dict for backward compat."""
+        profile = load_profile(self.profile_path)
+        return profile.to_dict()
 
     async def async_update_profile(self, user_input: str, assistant_reply: str) -> dict[str, Any]:
         """Asynchronously update profile using a small model and JSON Patch.
 
-        The whole flow is non-blocking for event loop:
-        - file I/O via asyncio.to_thread
-        - model HTTP request via asyncio.to_thread
+        Flow: read → model proposes patch → apply → validate with Pydantic → atomic write.
         """
         current_profile = await asyncio.to_thread(self.get_profile)
         patch_ops = await asyncio.to_thread(
@@ -71,25 +63,35 @@ class MemoryManager:
             )
             return current_profile
 
-        updated_profile = await asyncio.to_thread(self._apply_patch_safe, current_profile, patch_ops)
-        updated_profile = self._normalize_profile_schema(updated_profile)
-        updated_profile["last_updated"] = self._utc_now_iso()
+        # Apply JSON Patch on raw dict
+        updated_dict = await asyncio.to_thread(self._apply_patch_safe, current_profile, patch_ops)
 
-        await asyncio.to_thread(
-            self.profile_path.write_text,
-            json.dumps(updated_profile, ensure_ascii=False, indent=2) + "\n",
-            "utf-8",
-        )
+        # Validate & normalize through Pydantic (last line of defence against LLM output)
+        try:
+            validated = UserProfile.model_validate(updated_dict)
+        except Exception as exc:
+            logger.warning("Pydantic validation failed after patch — discarding update: %s", exc)
+            await asyncio.to_thread(
+                self._append_audit_log,
+                {"status": "validation_failed", "error": str(exc)},
+            )
+            return current_profile
+
+        validated.last_updated = _utc_now_iso()
+        validated_dict = validated.to_dict()
+
+        # Atomic write — won't corrupt on crash
+        await asyncio.to_thread(atomic_write_json, self.profile_path, validated_dict)
 
         await asyncio.to_thread(
             self._append_audit_log,
             {
                 "status": "updated",
                 "patch_count": len(patch_ops),
-                "last_updated": updated_profile["last_updated"],
+                "last_updated": validated.last_updated,
             },
         )
-        return updated_profile
+        return validated_dict
 
     def get_preference_summary(self) -> str:
         """Produce an LLM-readable summary of the user profile for prompt injection."""
@@ -142,9 +144,13 @@ class MemoryManager:
         if not isinstance(prefs, dict):
             return {"liked": [], "disliked": []}
         return {
-            "liked": self._coerce_string_list(prefs.get("liked", [])),
-            "disliked": self._coerce_string_list(prefs.get("disliked", [])),
+            "liked": _coerce_string_list(prefs.get("liked", [])),
+            "disliked": _coerce_string_list(prefs.get("disliked", [])),
         }
+
+    # ================================================================
+    # Private: JSON Patch engine (unchanged)
+    # ================================================================
 
     def _request_patch_from_model(
         self,
@@ -157,7 +163,6 @@ class MemoryManager:
         try:
             parsed = request_json_object(messages=messages, model=SLOW_CRITIC_MODEL, temperature=0.1)
 
-            # No obvious preference changes.
             if parsed == {}:
                 self._append_audit_log({"status": "no_change", "model": SLOW_CRITIC_MODEL})
                 return []
@@ -165,7 +170,6 @@ class MemoryManager:
             if isinstance(parsed.get("patch"), list):
                 normalized = self._normalize_patch(parsed["patch"])
             else:
-                # Compatibility: if model returns direct update object, convert to replace ops.
                 object_patch = self._convert_object_to_patch(parsed)
                 normalized = self._normalize_patch(object_patch)
 
@@ -187,14 +191,12 @@ class MemoryManager:
         for item in patch:
             if not isinstance(item, dict):
                 continue
-
             op = item.get("op")
             path = item.get("path")
             if not isinstance(op, str) or not isinstance(path, str):
                 continue
             if not self._is_allowed_patch_path(path):
                 continue
-
             safe_item: dict[str, Any] = {"op": op.strip().lower(), "path": path}
             if "value" in item:
                 safe_item["value"] = item["value"]
@@ -209,9 +211,11 @@ class MemoryManager:
         return patch
 
     def _is_allowed_patch_path(self, path: str) -> bool:
-        return path == "/core_taste" or path.startswith("/core_taste/") or path == "/artist_preference" or path.startswith(
-            "/artist_preference/"
-        ) or path == "/mood_bias" or path.startswith("/mood_bias/")
+        return (
+            path == "/core_taste" or path.startswith("/core_taste/")
+            or path == "/artist_preference" or path.startswith("/artist_preference/")
+            or path == "/mood_bias" or path.startswith("/mood_bias/")
+        )
 
     def _apply_patch_safe(self, source: dict[str, Any], ops: list[dict[str, Any]]) -> dict[str, Any]:
         doc = json.loads(json.dumps(source))
@@ -224,16 +228,13 @@ class MemoryManager:
         path = op.get("path")
         if not isinstance(path, str):
             return
-
         tokens = self._parse_pointer(path)
         if not tokens:
             if kind in {"add", "replace"} and isinstance(op.get("value"), dict):
                 doc.clear()
                 doc.update(op["value"])
             return
-
         parent, last = self._resolve_parent(doc, tokens)
-
         if kind == "add":
             self._add_value(parent, last, op.get("value"))
         elif kind == "replace":
@@ -303,69 +304,11 @@ class MemoryManager:
             raise ValueError("List index out of range.")
         return idx
 
-    def _default_profile(self) -> dict[str, Any]:
-        return {
-            "core_taste": [],
-            "artist_preference": {"liked": [], "disliked": []},
-            "mood_bias": {},
-            "last_updated": self._utc_now_iso(),
-        }
-
-    def _normalize_profile_schema(self, profile: dict[str, Any]) -> dict[str, Any]:
-        normalized = dict(profile)
-
-        core_taste = normalized.get("core_taste", [])
-        if isinstance(core_taste, list):
-            normalized["core_taste"] = [str(item).strip() for item in core_taste if str(item).strip()]
-        elif isinstance(core_taste, str) and core_taste.strip():
-            normalized["core_taste"] = [core_taste.strip()]
-        else:
-            normalized["core_taste"] = []
-
-        artist_preference = normalized.get("artist_preference", {})
-        if not isinstance(artist_preference, dict):
-            artist_preference = {}
-
-        liked = artist_preference.get("liked", [])
-        disliked = artist_preference.get("disliked", [])
-
-        artist_preference["liked"] = self._coerce_string_list(liked)
-        artist_preference["disliked"] = self._coerce_string_list(disliked)
-        normalized["artist_preference"] = artist_preference
-
-        mood_bias = normalized.get("mood_bias", {})
-        if not isinstance(mood_bias, dict):
-            mood_bias = {}
-        cleaned_mood_bias: dict[str, list[str]] = {}
-        for key, value in mood_bias.items():
-            key_str = str(key).strip()
-            if not key_str:
-                continue
-            cleaned_mood_bias[key_str] = self._coerce_string_list(value)
-        normalized["mood_bias"] = cleaned_mood_bias
-
-        last_updated = normalized.get("last_updated")
-        if not isinstance(last_updated, str) or not last_updated.strip():
-            normalized["last_updated"] = self._utc_now_iso()
-
-        return normalized
-
-    def _coerce_string_list(self, value: Any) -> list[str]:
-        if isinstance(value, list):
-            items = [str(item).strip() for item in value if str(item).strip()]
-            return list(dict.fromkeys(items))
-        if isinstance(value, str) and value.strip():
-            return [value.strip()]
-        return []
-
     def _append_audit_log(self, payload: dict[str, Any]) -> None:
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
-            "timestamp": self._utc_now_iso(),
+            "timestamp": _utc_now_iso(),
             **payload,
         }
         with self.audit_log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    def _utc_now_iso(self) -> str:
-        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

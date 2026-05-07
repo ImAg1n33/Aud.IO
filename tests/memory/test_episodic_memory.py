@@ -76,3 +76,50 @@ class TestEpisodicMemory:
             await episodic.store_snapshot(f"msg {i}")
         results = await episodic.query_recent(limit=3)
         assert len(results) == 3
+
+
+class TestPreferenceStats:
+    @pytest.mark.asyncio
+    async def test_stats_counts_genres(self, episodic) -> None:
+        await episodic.store_snapshot("play jazz", genre_tag="jazz",
+                                       played_song={"name": "a", "artist": "Artist A"})
+        await episodic.store_snapshot("play jazz again", genre_tag="jazz",
+                                       played_song={"name": "b", "artist": "Artist A"})
+        await episodic.store_snapshot("play rock", genre_tag="rock",
+                                       played_song={"name": "c", "artist": "Artist B"})
+
+        stats = await episodic.get_preference_stats()
+        assert stats["total_episodes"] == 3
+        top_genres = {g["genre"]: g["count"] for g in stats["top_genres"]}
+        assert top_genres.get("jazz") == 2
+        assert top_genres.get("rock") == 1
+
+    @pytest.mark.asyncio
+    async def test_stats_mood_genre_correlation(self, episodic) -> None:
+        await episodic.store_snapshot("happy morning", mood_tag="happy", genre_tag="pop")
+        await episodic.store_snapshot("happy again", mood_tag="happy", genre_tag="pop")
+
+        stats = await episodic.get_preference_stats()
+        correlations = stats["mood_genre_correlations"]
+        assert len(correlations) >= 1
+        happy_pop = [c for c in correlations if c["mood"] == "happy" and c["genre"] == "pop"]
+        assert len(happy_pop) == 1
+        assert happy_pop[0]["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_stats_empty_db(self, episodic) -> None:
+        stats = await episodic.get_preference_stats()
+        assert stats["total_episodes"] == 0
+        assert stats["top_genres"] == []
+
+    def test_format_stats_for_prompt(self, episodic) -> None:
+        stats = {"total_episodes": 0, "top_genres": [], "top_artists": [],
+                 "mood_genre_correlations": [], "time_patterns": []}
+        assert episodic.format_stats_for_prompt(stats) is None
+
+        stats["total_episodes"] = 3
+        stats["top_genres"] = [{"genre": "jazz", "count": 2}]
+        result = episodic.format_stats_for_prompt(stats)
+        assert result is not None
+        assert "jazz" in result
+        assert "2x" in result

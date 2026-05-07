@@ -7,7 +7,7 @@ from typing import Any
 from backend.agent.intent_classifier import Intent
 from backend.agent.memory_manager import MemoryManager
 from backend.memory.conversation_memory import ConversationMemory
-from backend.memory.episodic_memory import EpisodicMemory
+from backend.memory.episodic_memory import EpisodicMemory, EpisodicSnapshot
 from backend.tools.base import tool_registry
 
 
@@ -48,8 +48,9 @@ class ConversationHistoryProvider(ContextProvider):
 class UserPreferenceProvider(ContextProvider):
     name = "user_preference"
 
-    def __init__(self, memory_manager: MemoryManager) -> None:
+    def __init__(self, memory_manager: MemoryManager, episodic: EpisodicMemory | None = None) -> None:
         self._manager = memory_manager
+        self._episodic = episodic
 
     async def get_context(self, intent: Intent, user_input: str, metadata: dict[str, Any]) -> str | None:
         # Only inject for music intents
@@ -57,20 +58,33 @@ class UserPreferenceProvider(ContextProvider):
             return None
 
         summary = self._manager.get_preference_summary()
-        if not summary:
+
+        # Data-driven stats from episodic memory
+        stats_block: str | None = None
+        if self._episodic:
+            stats = await self._episodic.get_preference_stats()
+            stats_block = self._episodic.format_stats_for_prompt(stats)
+
+        if not summary and not stats_block:
             return None
 
-        lines = [
-            "[User Music Profile — use this to personalize recommendations]",
-            summary,
-            "",
-            "How to use this profile:",
-            "- If core_taste lists genres, prefer songs in those genres when the user is open-ended.",
-            "- If artist_preference has liked artists, mention/pick them when relevant.",
-            "- Avoid disliked artists and genres.",
-            "- If mood_bias is present and the user's mood or weather context matches a mood key, use those genres.",
-            "- Never say 'based on your profile' or 'I see you like' — just naturally pick fitting music.",
-        ]
+        lines = ["[User Music Profile — use this to personalize recommendations]"]
+
+        if summary:
+            lines.append(summary)
+            lines.append("")
+            lines.append("How to use this profile:")
+            lines.append("- If core_taste lists genres, prefer songs in those genres when the user is open-ended.")
+            lines.append("- If artist_preference has liked artists, mention/pick them when relevant.")
+            lines.append("- Avoid disliked artists and genres.")
+            lines.append("- If mood_bias is present and the user's mood or weather context matches a mood key, use those genres.")
+
+        if stats_block:
+            lines.append("")
+            lines.append(stats_block)
+            lines.append("- Use the stats above to ground your picks in the user's actual listening history.")
+
+        lines.append("- Never say 'based on your profile' or 'I see you like' — just naturally pick fitting music.")
         return "\n".join(lines)
 
 
@@ -108,33 +122,74 @@ class ToolSchemaProvider(ContextProvider):
 class EpisodicMemoryProvider(ContextProvider):
     name = "episodic_memory"
 
-    def __init__(self, episodic: EpisodicMemory) -> None:
+    # Bilingual mood mapping — Chinese input → English mood keys
+    _CN_MOOD_MAP: dict[str, str] = {
+        "开心": "happy", "高兴": "happy", "快乐": "happy",
+        "难过": "sad", "悲伤": "sad", "低落": "sad", "伤心": "sad", "emo": "sad",
+        "专注": "focused", "工作": "focused", "学习": "focused", "coding": "focused",
+        "平静": "calm", "安静": "calm", "放松": "calm", "relax": "calm", "chill": "calm",
+        "下雨": "rainy", "雨天": "rainy", "雨": "rainy", "rain": "rainy",
+        "兴奋": "happy", "激动": "happy", "energetic": "happy",
+    }
+
+    def __init__(self, episodic: EpisodicMemory, mood_keys: list[str] | None = None) -> None:
         self._episodic = episodic
+        self._mood_keys = [k.lower() for k in (mood_keys or []) if k.strip()]
+
+    def _detect_moods(self, user_input: str) -> list[str]:
+        """Detect mood tags from user input, supporting both English and Chinese."""
+        lowered = user_input.lower()
+        matched: set[str] = set()
+
+        # Direct English match
+        for mk in self._mood_keys:
+            if mk in lowered:
+                matched.add(mk)
+
+        # Chinese → English mapping
+        for cn_word, en_mood in self._CN_MOOD_MAP.items():
+            if cn_word in user_input and en_mood in self._mood_keys:
+                matched.add(en_mood)
+
+        return list(matched)
 
     async def get_context(self, intent: Intent, user_input: str, metadata: dict[str, Any]) -> str | None:
         if intent not in {Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND}:
             return None
 
-        # Check if user references past interactions
+        snapshots_by_id: dict[int, EpisodicSnapshot] = {}
+
+        # 1) Always try mood-based retrieval for music intents
+        matched_moods = self._detect_moods(user_input)
+        for mood in matched_moods:
+            mood_snaps = await self._episodic.query_by_tags(mood_tag=mood, limit=2)
+            for snap in mood_snaps:
+                snapshots_by_id[snap.id] = snap
+
+        # 2) Temporal references → recent history
         temporal_signals = [
             "上次", "昨天", "之前", "上次那个", "上次那首",
             "last time", "yesterday", "before", "last song", "previous",
             "again", "再", "又",
         ]
-        if not any(sig in user_input for sig in temporal_signals):
+        if any(sig in user_input for sig in temporal_signals):
+            recent = await self._episodic.query_recent(limit=3)
+            for snap in recent:
+                snapshots_by_id[snap.id] = snap
+
+        if not snapshots_by_id:
             return None
 
-        snapshots = await self._episodic.query_recent(limit=3)
-        if not snapshots:
-            return None
+        sorted_snaps = sorted(snapshots_by_id.values(), key=lambda s: s.timestamp, reverse=True)
 
         lines = ["[Past interactions — you may reference these naturally]"]
-        for snap in snapshots:
+        for snap in sorted_snaps[:5]:
             song_info = ""
             if snap.played_song_name:
                 song_info = f" [played: {snap.played_song_artist or ''} - {snap.played_song_name}]"
+            mood_info = f" (mood: {snap.mood_tag})" if snap.mood_tag else ""
             lines.append(
-                f"- User: {snap.user_input} | Aud.IO: {snap.assistant_reply[:120]}{song_info}"
+                f"- User: {snap.user_input} | Aud.IO: {snap.assistant_reply[:120]}{song_info}{mood_info}"
             )
         return "\n".join(lines)
 

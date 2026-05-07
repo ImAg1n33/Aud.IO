@@ -132,15 +132,15 @@ class TestToolSchemaProvider:
 class TestEpisodicMemoryProvider:
     @pytest.mark.asyncio
     async def test_returns_none_for_chitchat(self, episodic_memory) -> None:
-        provider = EpisodicMemoryProvider(episodic_memory)
+        provider = EpisodicMemoryProvider(episodic_memory, mood_keys=["happy", "sad"])
         result = await provider.get_context(Intent.CHITCHAT, "hello", {})
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_no_temporal_signal(self, episodic_memory) -> None:
-        provider = EpisodicMemoryProvider(episodic_memory)
+    async def test_returns_none_when_no_match(self, episodic_memory) -> None:
+        provider = EpisodicMemoryProvider(episodic_memory, mood_keys=["happy", "sad"])
         result = await provider.get_context(Intent.MUSIC_PLAY, "play jazz", {})
-        assert result is None
+        assert result is None  # No mood match, no temporal signal
 
     @pytest.mark.asyncio
     async def test_queries_when_temporal_signal(self, episodic_memory) -> None:
@@ -151,6 +151,31 @@ class TestEpisodicMemoryProvider:
         result = await provider.get_context(Intent.MUSIC_PLAY, "上次那首", {})
         assert result is not None
         assert "So What" in result
+
+    @pytest.mark.asyncio
+    async def test_queries_by_mood_proactively(self, episodic_memory) -> None:
+        await episodic_memory.store_snapshot(
+            "feeling down", "Playing sad piano.",
+            mood_tag="sad", played_song={"name": "Sad Song", "artist": "Pianist"}
+        )
+        provider = EpisodicMemoryProvider(episodic_memory, mood_keys=["happy", "sad", "calm"])
+        # No temporal signal, but "sad" mood matches
+        result = await provider.get_context(Intent.MUSIC_PLAY, "心情低落想听点悲伤的音乐", {})
+        assert result is not None
+        assert "Sad Song" in result
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_across_queries(self, episodic_memory) -> None:
+        sid = await episodic_memory.store_snapshot(
+            "play sad song", "Here is a sad one.", mood_tag="sad",
+            played_song={"name": "Unique", "artist": "T"}
+        )
+        provider = EpisodicMemoryProvider(episodic_memory, mood_keys=["sad"])
+        # Same snapshot should not appear twice if temporal AND mood both return it
+        result = await provider.get_context(Intent.MUSIC_PLAY, "上次那首 心情很悲伤", {})
+        assert result is not None
+        # Count occurrences of "Unique" — should be exactly 1
+        assert result.count("Unique") == 1
 
 
 class TestContextAssembler:

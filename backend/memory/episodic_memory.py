@@ -179,6 +179,99 @@ class EpisodicMemory:
         return await asyncio.to_thread(_query)
 
 
+    async def get_preference_stats(self) -> dict[str, Any]:
+        """Compute data-driven preference statistics from the episodes table.
+
+        Returns counts and patterns — no LLM involved, pure SQL aggregation.
+        """
+
+        def _compute() -> dict[str, Any]:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                # Top genres
+                genre_rows = conn.execute(
+                    """SELECT genre_tag, COUNT(*) as cnt FROM episodes
+                       WHERE genre_tag IS NOT NULL AND genre_tag != ''
+                       GROUP BY genre_tag ORDER BY cnt DESC LIMIT 8"""
+                ).fetchall()
+                top_genres = [{"genre": row[0], "count": row[1]} for row in genre_rows]
+
+                # Top artists
+                artist_rows = conn.execute(
+                    """SELECT played_song_artist, COUNT(*) as cnt FROM episodes
+                       WHERE played_song_artist IS NOT NULL AND played_song_artist != ''
+                       GROUP BY played_song_artist ORDER BY cnt DESC LIMIT 8"""
+                ).fetchall()
+                top_artists = [{"artist": row[0], "count": row[1]} for row in artist_rows]
+
+                # Mood-genre correlations
+                mood_genre_rows = conn.execute(
+                    """SELECT mood_tag, genre_tag, COUNT(*) as cnt FROM episodes
+                       WHERE mood_tag IS NOT NULL AND mood_tag != ''
+                         AND genre_tag IS NOT NULL AND genre_tag != ''
+                       GROUP BY mood_tag, genre_tag ORDER BY cnt DESC LIMIT 12"""
+                ).fetchall()
+                mood_genre = [
+                    {"mood": row[0], "genre": row[1], "count": row[2]}
+                    for row in mood_genre_rows
+                ]
+
+                # Time-of-day patterns
+                time_rows = conn.execute(
+                    """SELECT time_of_day, genre_tag, COUNT(*) as cnt FROM episodes
+                       WHERE genre_tag IS NOT NULL AND genre_tag != ''
+                       GROUP BY time_of_day, genre_tag ORDER BY cnt DESC LIMIT 12"""
+                ).fetchall()
+                time_patterns = [
+                    {"time": row[0], "genre": row[1], "count": row[2]}
+                    for row in time_rows
+                ]
+
+                # Total episodes
+                total_row = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()
+                total = total_row[0] if total_row else 0
+
+            return {
+                "total_episodes": total,
+                "top_genres": top_genres,
+                "top_artists": top_artists,
+                "mood_genre_correlations": mood_genre,
+                "time_patterns": time_patterns,
+            }
+
+        return await asyncio.to_thread(_compute)
+
+    def format_stats_for_prompt(self, stats: dict[str, Any]) -> str | None:
+        """Format preference stats into an LLM-readable block."""
+        if not stats or stats.get("total_episodes", 0) == 0:
+            return None
+
+        lines = ["[Data-driven insights from your listening history]"]
+
+        top_genres = stats.get("top_genres", [])
+        if top_genres:
+            genre_str = ", ".join(f"{g['genre']}({g['count']}x)" for g in top_genres[:5])
+            lines.append(f"Most played genres: {genre_str}")
+
+        top_artists = stats.get("top_artists", [])
+        if top_artists:
+            artist_str = ", ".join(f"{a['artist']}({a['count']}x)" for a in top_artists[:5])
+            lines.append(f"Most played artists: {artist_str}")
+
+        mood_corr = stats.get("mood_genre_correlations", [])
+        if mood_corr:
+            lines.append("Mood-genre patterns:")
+            for mc in mood_corr[:6]:
+                lines.append(f"  {mc['mood']} → {mc['genre']} ({mc['count']}x)")
+
+        time_pat = stats.get("time_patterns", [])
+        if time_pat:
+            lines.append("Time-of-day patterns:")
+            for tp in time_pat[:6]:
+                lines.append(f"  {tp['time']} → {tp['genre']} ({tp['count']}x)")
+
+        return "\n".join(lines)
+
+
 def _row_to_snapshot(row: tuple[Any, ...]) -> EpisodicSnapshot:
     return EpisodicSnapshot(
         id=row[0],

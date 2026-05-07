@@ -36,15 +36,16 @@ class AssistantService:
         self.episodic_memory = EpisodicMemory(
             episodic_db_path or (backend_root / "memory" / "episodes.db")
         )
+        self.episodic_provider = EpisodicMemoryProvider(self.episodic_memory)
         self.intent_classifier = IntentClassifier()
         self.tool_executor = ToolExecutor(max_retries=self.MAX_RETRIES)
         self.context_assembler = ContextAssembler(
             providers=[
                 ConversationHistoryProvider(self.short_term_memory),
-                UserPreferenceProvider(self.memory_manager),
+                UserPreferenceProvider(self.memory_manager, self.episodic_memory),
                 CurrentlyPlayingProvider(),
                 ToolSchemaProvider(),
-                EpisodicMemoryProvider(self.episodic_memory),
+                self.episodic_provider,
             ],
             system_persona=ENHANCED_SYSTEM_PERSONA,
             tool_constraints=ENHANCED_TOOL_CONSTRAINTS,
@@ -60,6 +61,11 @@ class AssistantService:
         # === PERCEIVE ===
         intent = self.intent_classifier.classify(user_input)
         metadata: dict[str, Any] = dict(context or {})
+
+        # Refresh mood keys from latest profile so episodic provider stays current
+        profile = self.memory_manager.get_profile()
+        mood_bias = profile.get("mood_bias", {}) if isinstance(profile, dict) else {}
+        self.episodic_provider._mood_keys = [k.lower() for k in mood_bias.keys() if k.strip()]
 
         prompt = await self.context_assembler.assemble(user_input, intent, metadata)
 

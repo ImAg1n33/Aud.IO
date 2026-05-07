@@ -33,3 +33,6 @@ coverage/
 # OS and editors
 .DS_Store
 Thumbs.db
+
+# Claude Code (local workspace settings)
+.claude/

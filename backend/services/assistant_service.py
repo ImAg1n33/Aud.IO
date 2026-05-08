@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from backend.agent.context_assembler import (
     UserPreferenceProvider,
 )
 from backend.agent.intent_classifier import IntentClassifier
-from backend.agent.llm_client import call_llm
+from backend.agent.llm_client import call_llm, stream_llm
 from backend.agent.memory_manager import MemoryManager
 from backend.agent.prompt_builder import ENHANCED_SYSTEM_PERSONA, ENHANCED_TOOL_CONSTRAINTS
 from backend.agent.tool_executor import ToolExecutor
@@ -114,6 +115,77 @@ class AssistantService:
             )
 
         return final_reply, prompt
+
+    async def generate_reply_stream(
+        self, user_input: str, context: dict[str, Any] | None
+    ) -> AsyncGenerator[str, None]:
+        """Streaming variant: yields SSE events for real-time typewriter UX.
+
+        Events:
+          event: token  data: "<raw content chunk>"     — streaming activity indicator
+          event: text   data: "<clean answer text>"     — replaces display when ready
+          event: music  data: <JSON music object>       — trigger playback
+          event: done   data: <JSON full reply>         — debug panel
+          event: error  data: "<error message>"
+        """
+        # === PERCEIVE (same as non-streaming) ===
+        intent = self.intent_classifier.classify(user_input)
+        metadata: dict[str, Any] = dict(context or {})
+
+        profile = self.memory_manager.get_profile()
+        mood_bias = profile.get("mood_bias", {}) if isinstance(profile, dict) else {}
+        self.episodic_provider._mood_keys = [k.lower() for k in mood_bias.keys() if k.strip()]
+
+        prompt = await self.context_assembler.assemble(user_input, intent, metadata)
+
+        # === DECIDE (streaming) ===
+        reply: dict[str, Any] = {}
+
+        async for chunk in stream_llm(prompt):
+            if isinstance(chunk, str):
+                yield self._sse("token", chunk)
+            elif isinstance(chunk, dict):
+                reply = chunk
+                if reply.get("analysis") == "Model call failed.":
+                    yield self._sse("error", reply.get("answer", "Request failed"))
+                    return
+
+        # Send clean answer text for display replacement
+        yield self._sse("text", reply.get("answer", ""))
+
+        # === EXECUTE (tool actions after streaming) ===
+        actions = self._parse_actions_from_reply(reply)
+        results = await self.tool_executor.execute_actions(actions)
+        final_reply = self._merge_tool_results(reply, results)
+
+        # Send music data
+        music = final_reply.get("music")
+        if isinstance(music, dict) and music.get("song_id"):
+            yield self._sse("music", json.dumps(music, ensure_ascii=False))
+
+        # === RECORD ===
+        played_song = final_reply.get("music")
+        self.short_term_memory.add_turn(
+            user_input,
+            final_reply.get("answer", ""),
+            intent=str(intent),
+            played_song=played_song,
+        )
+        asyncio.ensure_future(
+            self.episodic_memory.store_snapshot(
+                user_input,
+                final_reply.get("answer", ""),
+                played_song=played_song,
+            )
+        )
+
+        # Done — send full reply for debug panel
+        yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
+
+    @staticmethod
+    def _sse(event: str, data: str) -> str:
+        """Format an SSE message."""
+        return f"event: {event}\ndata: {data}\n\n"
 
     def schedule_profile_update(
         self,

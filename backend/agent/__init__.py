@@ -8,7 +8,7 @@ from backend.agent.context_assembler import (
     UserPreferenceProvider,
 )
 from backend.agent.intent_classifier import Intent, IntentClassifier
-from backend.agent.llm_client import call_llm, request_json_object
+from backend.agent.llm_client import call_llm, request_json_object, stream_llm
 from backend.agent.memory_manager import MemoryManager
 from backend.agent.prompt_builder import (
     ENHANCED_SYSTEM_PERSONA,
@@ -24,6 +24,7 @@ __all__ = [
     # LLM
     "call_llm",
     "request_json_object",
+    "stream_llm",
     # Memory
     "MemoryManager",
     # Intent

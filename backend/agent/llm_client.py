@@ -1,8 +1,11 @@
 import json
 import os
+from collections.abc import AsyncGenerator
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+import httpx
 
 
 def _get_llm_config(model_override: str | None = None) -> dict[str, str]:
@@ -160,6 +163,101 @@ def call_llm(prompt: str, model: str | None = None) -> dict[str, Any]:
         return _normalize_response(parsed, config["provider"], config["model"])
     except (HTTPError, URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError) as exc:
         return {
+            "analysis": "Model call failed.",
+            "answer": "DeepSeek request failed, please check network/key/model settings.",
+            "actions": [str(exc)],
+            "play_keyword": "",
+            "provider": config["provider"],
+            "model": config["model"],
+        }
+
+
+# ============================================================
+# Streaming support (SSE, for real-time typewriter UX + future TTS)
+# ============================================================
+
+async def stream_llm(
+    prompt: str, model: str | None = None
+) -> AsyncGenerator[str | dict[str, Any], None]:
+    """Stream LLM response, yielding raw content chunks and a final dict.
+
+    Yields:
+        str  — raw content chunk from the LLM (for frontend typewriter effect)
+        dict — final structured reply (analysis, answer, actions, play_keyword, ...)
+    """
+    config = _get_llm_config(model_override=model)
+
+    if not config["api_key"]:
+        yield {
+            "analysis": "Missing API key.",
+            "answer": "LLM_API_KEY is not configured.",
+            "actions": ["Set backend/.env with LLM_API_KEY and retry."],
+            "play_keyword": "",
+            "provider": config["provider"],
+            "model": config["model"],
+        }
+        return
+
+    endpoint = f"{config['base_url'].rstrip('/')}/chat/completions"
+    body = {
+        "model": config["model"],
+        "temperature": 0.2,
+        "stream": True,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are Aud.IO's reasoning core. Think based on user input and return "
+                    "strict JSON only with keys: analysis (string), answer (string), "
+                    "actions (string array), play_keyword (string). "
+                    "If user asks to play/search a song, play_keyword must be a concrete "
+                    "music search phrase. Otherwise set play_keyword to an empty string."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    full_content = ""
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with client.stream(
+                "POST",
+                endpoint,
+                json=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config['api_key']}",
+                },
+            ) as response:
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = (
+                            chunk.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+                    if not delta:
+                        continue
+                    full_content += delta
+                    yield delta  # raw content chunk
+
+        # Parse full response
+        parsed = _extract_json(full_content)
+        normalized = _normalize_response(parsed, config["provider"], config["model"])
+        yield normalized
+
+    except (httpx.HTTPError, httpx.TimeoutException, json.JSONDecodeError, ValueError) as exc:
+        yield {
             "analysis": "Model call failed.",
             "answer": "DeepSeek request failed, please check network/key/model settings.",
             "actions": [str(exc)],

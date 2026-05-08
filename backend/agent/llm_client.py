@@ -233,9 +233,12 @@ async def stream_llm(
         ],
     }
 
+    MARKER = "---JSON---"
     full_content = ""
     in_json = False
     json_buffer = ""
+    text_output = ""  # confirmed clean text already sent to client
+    text_pending = ""  # last N chars buffered to catch partial marker
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -269,13 +272,26 @@ async def stream_llm(
 
                     if in_json:
                         json_buffer += delta
-                    elif "---JSON---" in full_content:
-                        parts = full_content.split("---JSON---", 1)
+                    elif MARKER in full_content:
+                        # Split at marker — flush remaining text, then collect JSON
+                        parts = full_content.split(MARKER, 1)
+                        clean_text = parts[0]
+                        # Yield any text still pending (not yet sent)
+                        new_chars = clean_text[len(text_output):]
+                        if new_chars:
+                            yield new_chars
+                            text_output += new_chars
                         in_json = True
                         json_buffer = parts[1] if len(parts) > 1 else ""
                     else:
-                        # Still in text phase — yield displayable content
-                        yield delta
+                        # Buffer last N chars to avoid leaking partial marker
+                        text_pending += delta
+                        safe_len = max(0, len(text_pending) - len(MARKER))
+                        if safe_len > 0:
+                            safe = text_pending[:safe_len]
+                            yield safe
+                            text_output += safe
+                            text_pending = text_pending[safe_len:]
 
         # Parse JSON block
         try:

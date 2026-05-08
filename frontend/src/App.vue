@@ -106,6 +106,9 @@ const sendCommand = async () => {
   responseColor.value = '#888'
   responseText.value = '> '
   showPlayer.value = false
+  // Clear typewriter queue
+  typeQueue = []
+  if (typeTimer) { clearInterval(typeTimer); typeTimer = null }
 
   // Smooth fade-out instead of abrupt stop
   initAudioCtx()
@@ -161,12 +164,39 @@ const sendCommand = async () => {
   }
 }
 
+// Typewriter queue — buffers incoming tokens and displays them at readable speed
+let typeQueue = []
+let typeTimer = null
+const TYPE_SPEED = 28  // ms per character
+
+const flushTypeQueue = () => {
+  if (typeQueue.length === 0) {
+    if (typeTimer) { clearInterval(typeTimer); typeTimer = null }
+    return
+  }
+  const chars = typeQueue.splice(0, 2)  // pop 1-2 chars per tick
+  responseText.value += chars.join('')
+  if (typeQueue.length === 0) {
+    clearInterval(typeTimer)
+    typeTimer = null
+  }
+}
+
+const startTyping = () => {
+  if (!typeTimer && typeQueue.length > 0) {
+    typeTimer = setInterval(flushTypeQueue, TYPE_SPEED)
+  }
+}
+
 const handleSSE = (event, data) => {
   switch (event) {
     case "token":
-      // True typewriter: append each character as it arrives
+      // Buffer tokens and type out at controlled speed
       responseColor.value = '#ffffff'
-      responseText.value += data
+      for (const ch of data) {
+        typeQueue.push(ch)
+      }
+      startTyping()
       break
 
     case "text":

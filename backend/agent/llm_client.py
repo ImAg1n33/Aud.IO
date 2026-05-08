@@ -176,14 +176,37 @@ def call_llm(prompt: str, model: str | None = None) -> dict[str, Any]:
 # Streaming support (SSE, for real-time typewriter UX + future TTS)
 # ============================================================
 
+_STREAM_SYSTEM_PROMPT = """You are Aud.IO's streaming DJ core.
+
+Output in two parts, separated by the marker ---JSON--- on its own line:
+
+Part 1: Your natural spoken answer to the user. Be warm, concise, DJ-like.
+Write this as if you're speaking on air. Use the same language the user uses.
+
+Part 2: A single JSON line with these keys:
+- analysis: brief reasoning
+- actions: list of tool calls, each a JSON object like {"tool": "search_music", "keyword": "Artist Song"}
+- play_keyword: the music search phrase (Artist SongTitle format), or empty string
+
+Example output:
+Hi there! The weather is perfect for some chill jazz. Here is Miles Davis for you.
+---JSON---
+{"analysis": "user wants jazz", "actions": [{"tool": "search_music", "keyword": "Miles Davis So What"}], "play_keyword": "Miles Davis So What"}
+
+IMPORTANT: The JSON part must be valid JSON on a single line after the ---JSON--- marker."""
+
+
 async def stream_llm(
     prompt: str, model: str | None = None
 ) -> AsyncGenerator[str | dict[str, Any], None]:
-    """Stream LLM response, yielding raw content chunks and a final dict.
+    """Stream LLM response: yields natural text tokens, then a final dict.
+
+    The LLM outputs natural text first (streamed to user), then a JSON block
+    after a ---JSON--- marker for structured parsing.
 
     Yields:
-        str  — raw content chunk from the LLM (for frontend typewriter effect)
-        dict — final structured reply (analysis, answer, actions, play_keyword, ...)
+        str  — answer text tokens (typewriter stream)
+        dict — final structured reply
     """
     config = _get_llm_config(model_override=model)
 
@@ -198,27 +221,21 @@ async def stream_llm(
         }
         return
 
+    full_prompt = f"{_STREAM_SYSTEM_PROMPT}\n\n{prompt}"
+
     endpoint = f"{config['base_url'].rstrip('/')}/chat/completions"
     body = {
         "model": config["model"],
         "temperature": 0.2,
         "stream": True,
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are Aud.IO's reasoning core. Think based on user input and return "
-                    "strict JSON only with keys: analysis (string), answer (string), "
-                    "actions (string array), play_keyword (string). "
-                    "If user asks to play/search a song, play_keyword must be a concrete "
-                    "music search phrase. Otherwise set play_keyword to an empty string."
-                ),
-            },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": full_prompt},
         ],
     }
 
     full_content = ""
+    in_json = False
+    json_buffer = ""
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -249,11 +266,33 @@ async def stream_llm(
                     if not delta:
                         continue
                     full_content += delta
-                    yield delta  # raw content chunk
 
-        # Parse full response
-        parsed = _extract_json(full_content)
+                    if in_json:
+                        json_buffer += delta
+                    elif "---JSON---" in full_content:
+                        parts = full_content.split("---JSON---", 1)
+                        in_json = True
+                        json_buffer = parts[1] if len(parts) > 1 else ""
+                    else:
+                        # Still in text phase — yield displayable content
+                        yield delta
+
+        # Parse JSON block
+        try:
+            json_str = json_buffer.strip()
+            parsed = json.loads(json_str)
+            if not isinstance(parsed, dict):
+                raise ValueError("JSON is not a dict")
+        except (json.JSONDecodeError, ValueError):
+            # Fallback: try to extract JSON from full_content
+            try:
+                parsed = _extract_json(full_content)
+            except (json.JSONDecodeError, ValueError):
+                parsed = {"analysis": "", "answer": full_content.split("---JSON---")[0][:200], "actions": [], "play_keyword": ""}
+
+        text_answer = full_content.split("---JSON---")[0].strip()
         normalized = _normalize_response(parsed, config["provider"], config["model"])
+        normalized["answer"] = text_answer  # Use the natural text, not whatever JSON says
         yield normalized
 
     except (httpx.HTTPError, httpx.TimeoutException, json.JSONDecodeError, ValueError) as exc:

@@ -11,21 +11,68 @@ const showDebug = ref(false)
 const trackName = ref('///')
 const jsonDump = ref('')
 const audioElement = ref(null)
+const fadeGain = ref(null)  // AudioContext gain node for smooth transitions
 
 let currentPlayingTrack = "None"
+let audioCtx = null
+let fadeTimer = null
 
 // Player control state
 const isPlaying = ref(false)
 const playMode = ref('dj')
 
+const initAudioCtx = () => {
+  if (!audioCtx && audioElement.value) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    const source = audioCtx.createMediaElementSource(audioElement.value)
+    const gain = audioCtx.createGain()
+    source.connect(gain)
+    gain.connect(audioCtx.destination)
+    fadeGain.value = gain
+  }
+}
+
+const fadeOut = (duration = 1.5) => {
+  if (!fadeGain.value) return
+  if (fadeTimer) clearTimeout(fadeTimer)
+  const gain = fadeGain.value
+  gain.gain.setValueAtTime(gain.gain.value, audioCtx.currentTime)
+  gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration)
+}
+
+const fadeIn = (duration = 0.8) => {
+  if (!fadeGain.value) return
+  if (fadeTimer) clearTimeout(fadeTimer)
+  const gain = fadeGain.value
+  gain.gain.setValueAtTime(0, audioCtx.currentTime)
+  gain.gain.linearRampToValueAtTime(1, audioCtx.currentTime + duration)
+}
+
+const stopAudio = () => {
+  if (audioElement.value) {
+    fadeOut(1.2)
+    fadeTimer = setTimeout(() => {
+      audioElement.value.pause()
+      audioElement.value.currentTime = 0
+      isPlaying.value = false
+    }, 1300)
+  }
+}
+
 const togglePlay = () => {
   if (!audioElement.value) return
+  initAudioCtx()
   if (isPlaying.value) {
-    audioElement.value.pause()
+    fadeOut(0.5)
+    fadeTimer = setTimeout(() => {
+      audioElement.value.pause()
+      isPlaying.value = false
+    }, 600)
   } else {
     audioElement.value.play()
+    fadeIn(0.3)
+    isPlaying.value = true
   }
-  isPlaying.value = !isPlaying.value
 }
 
 const toggleMode = () => {
@@ -49,7 +96,7 @@ const onAudioEnded = () => {
   }
 }
 
-// === Streaming sendCommand ===
+// === Streaming sendCommand with typewriter effect ===
 const sendCommand = async () => {
   const text = userInput.value.trim()
   if (!text) return
@@ -59,7 +106,10 @@ const sendCommand = async () => {
   responseColor.value = '#888'
   responseText.value = '> '
   showPlayer.value = false
-  if (audioElement.value) audioElement.value.pause()
+
+  // Smooth fade-out instead of abrupt stop
+  initAudioCtx()
+  stopAudio()
 
   try {
     const response = await fetch("http://127.0.0.1:8001/v1/agent/respond/stream", {
@@ -82,10 +132,8 @@ const sendCommand = async () => {
       if (done) break
 
       buffer += decoder.decode(value, { stream: true })
-
-      // Parse SSE events from buffer
       const lines = buffer.split('\n')
-      buffer = ""  // rebuild unconsumed portion
+      buffer = ""
 
       let currentEvent = ""
       let currentData = ""
@@ -94,14 +142,12 @@ const sendCommand = async () => {
         if (line.startsWith("event: ")) {
           currentEvent = line.slice(7).trim()
         } else if (line.startsWith("data: ")) {
-          currentData = line.slice(6)
+          currentData += (currentData ? '\n' : '') + line.slice(6)
         } else if (line === "" && currentEvent) {
-          // End of event — process it
           handleSSE(currentEvent, currentData)
           currentEvent = ""
           currentData = ""
         } else if (line !== "") {
-          // Continuation or incomplete — put back in buffer
           buffer += line + '\n'
         }
       }
@@ -118,28 +164,27 @@ const sendCommand = async () => {
 const handleSSE = (event, data) => {
   switch (event) {
     case "token":
-      // Raw streaming activity — show dots/progress
-      if (responseText.value === '> ') {
-        responseText.value = '> █'
-      } else if (responseText.value.endsWith('█')) {
-        responseText.value = responseText.value.slice(0, -1) + ' '
-      } else if (responseText.value.endsWith(' ')) {
-        responseText.value = responseText.value.slice(0, -1) + '█'
-      }
+      // True typewriter: append each character as it arrives
+      responseColor.value = '#ffffff'
+      responseText.value += data
       break
 
     case "text":
-      // Clean answer text — replace the activity indicator
-      responseColor.value = '#ffffff'
-      responseText.value = "> " + data
+      // Clean answer fallback (if streaming missed tokens)
+      if (responseText.value === '> ') {
+        responseColor.value = '#ffffff'
+        responseText.value = "> " + data
+      }
       break
 
     case "music":
       try {
         const music = JSON.parse(data)
         if (music.mp3_url) {
+          initAudioCtx()
           audioElement.value.src = music.mp3_url
           audioElement.value.play()
+          fadeIn(0.6)
           isPlaying.value = true
           currentPlayingTrack = `${music.artist} - ${music.name}`
           trackName.value = `♪ ${music.name} - ${music.artist} ♪`
@@ -174,7 +219,7 @@ const handleSSE = (event, data) => {
 
     <div class="display-box">
       <span :style="{ color: responseColor }" style="white-space: pre-wrap;">{{ responseText }}</span>
-      <span class="cursor" v-show="!isProcessing"></span>
+      <span class="cursor"></span>
     </div>
 
     <div class="input-group">
@@ -205,7 +250,7 @@ const handleSSE = (event, data) => {
         <button class="ctrl-btn" @click="nextTrack" title="Next">▶▶|</button>
       </div>
 
-      <audio ref="audioElement" @ended="onAudioEnded"></audio>
+      <audio ref="audioElement" @ended="onAudioEnded" crossorigin="anonymous"></audio>
     </div>
 
     <div class="debug-panel" v-show="showDebug">

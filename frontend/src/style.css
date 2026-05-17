@@ -1,182 +1,323 @@
-@import url('https://fonts.googleapis.com/css2?family=DotGothic16&display=swap');
+/* ==============================================
+   Nothing Design System — Aud.IO
+   Dark mode: instrument panel in a dark room
+   Light mode: printed technical manual
+   ============================================== */
 
+/* ----- Fonts ----- */
+@import url('https://fonts.googleapis.com/css2?family=Doto:wght@400&family=Space+Grotesk:wght@400;500&family=Space+Mono:wght@400&display=swap');
+
+/* ----- Tokens: Dark Mode (default) ----- */
 :root {
-    --bg-color: #000000;
-    --fg-color: #ffffff;
-    --accent-red: #ea3323;
-    --dim-gray: #333333;
+  --black: #000000;
+  --surface: #111111;
+  --surface-raised: #1A1A1A;
+  --border: #222222;
+  --border-visible: #333333;
+  --text-disabled: #666666;
+  --text-secondary: #999999;
+  --text-primary: #E8E8E8;
+  --text-display: #FFFFFF;
+  --accent: #D71921;
+  --accent-subtle: rgba(215,25,33,0.15);
+  --success: #4A9E5C;
+  --warning: #D4A843;
+  --interactive: #5B9BF6;
+
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+  --space-4xl: 96px;
+
+  --font-display: 'Doto', 'Space Mono', monospace;
+  --font-body: 'Space Grotesk', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono: 'Space Mono', 'JetBrains Mono', 'SF Mono', monospace;
+
+  --ease-out: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --dur-fast: 150ms;
+  --dur-normal: 250ms;
+  --dur-slow: 400ms;
+}
+
+/* ----- Tokens: Light Mode ----- */
+[data-theme="light"] {
+  --black: #F5F5F5;
+  --surface: #FFFFFF;
+  --surface-raised: #F0F0F0;
+  --border: #E8E8E8;
+  --border-visible: #CCCCCC;
+  --text-disabled: #999999;
+  --text-secondary: #666666;
+  --text-primary: #1A1A1A;
+  --text-display: #000000;
+  --interactive: #007AFF;
+}
+
+/* ----- Reset ----- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
 
 body {
-    background-color: var(--bg-color);
-    color: var(--fg-color);
-    font-family: 'DotGothic16', monospace;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100vh;
-    margin: 0;
-    user-select: none;
+  background-color: var(--black);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.5;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-.container {
-    width: 90%;
-    max-width: 700px;
+/* ----- App Layout ----- */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: var(--space-lg) var(--space-xl);
 }
 
-/* 顶部 Logo */
-.header {
-    font-size: 4rem;
-    color: var(--accent-red);
-    letter-spacing: 10px;
-    margin-bottom: 2rem;
-    text-shadow: 2px 2px 0px rgba(255, 0, 0, 0.3);
+/* ----- Toolbar (tertiary) ----- */
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: var(--space-sm);
 }
 
-/* AI 状态展示区 */
-.display-box {
-    border: 2px solid var(--dim-gray);
-    padding: 20px;
-    min-height: 120px;
-    font-size: 1.5rem;
-    margin-bottom: 30px;
-    position: relative;
-    background: repeating-linear-gradient(
-        0deg,
-        rgba(0,0,0,0.15),
-        rgba(0,0,0,0.15) 1px,
-        transparent 1px,
-        transparent 2px
-    ); 
+.brand {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-disabled);
 }
 
-/* 输入区 */
-.input-group {
-    display: flex;
-    gap: 15px;
+.toolbar-actions {
+  display: flex;
+  gap: var(--space-md);
 }
 
-input {
-    flex: 1;
-    background: transparent;
-    border: 2px solid var(--fg-color);
-    color: var(--fg-color);
-    font-family: inherit;
-    font-size: 1.5rem;
-    padding: 15px;
-    outline: none;
+.toolbar-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-disabled);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: var(--space-xs) 0;
+  transition: color var(--dur-fast) var(--ease-out);
 }
 
-input:focus {
-    border-color: var(--accent-red);
+.toolbar-btn:hover {
+  color: var(--text-secondary);
 }
 
-button {
-    background: var(--fg-color);
-    color: var(--bg-color);
-    border: none;
-    padding: 0 40px;
-    font-family: inherit;
-    font-size: 1.5rem;
-    font-weight: bold;
-    cursor: pointer;
-    transition: all 0.2s;
-    text-transform: uppercase;
+/* ----- Response Area (primary) ----- */
+.response-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  padding: var(--space-4xl) 0;
+  background-image: radial-gradient(circle, var(--border-visible) 1px, transparent 1px);
+  background-size: 16px 16px;
 }
 
-button:hover {
-    background: var(--accent-red);
-    color: var(--fg-color);
+.response-text {
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-width: 640px;
 }
 
-button:disabled {
-    background: var(--dim-gray);
-    color: #666;
-    cursor: not-allowed;
-}
-
-/* 音乐播放器面板 */
-.player-panel {
-    margin-top: 30px;
-    border-top: 2px dashed var(--dim-gray);
-    padding-top: 20px;
-}
-
-.track-info {
-    font-size: 2rem;
-    color: var(--accent-red);
-    animation: marquee 10s linear infinite;
-    white-space: nowrap;
-}
-
-/* 闪烁的光标 */
 .cursor {
-    display: inline-block;
-    width: 15px;
-    height: 1.2rem;
-    background-color: var(--accent-red);
-    animation: blink 1s step-end infinite;
-    vertical-align: text-bottom;
+  display: inline-block;
+  width: 1.5px;
+  height: 1em;
+  background: var(--text-display);
+  animation: cursor-blink 1s var(--ease-out) infinite;
+  vertical-align: text-bottom;
+  margin-left: 1px;
 }
 
-/* 神经监控面板 */
-.debug-panel {
-    width: 100%;
-    margin-top: 20px;
-    padding: 15px;
-    background: rgba(234, 51, 35, 0.05);
-    border: 1px solid var(--accent-red);
-    font-size: 1rem;
-    color: var(--accent-red);
-    overflow-y: auto;
-    max-height: 200px;
+/* ----- Player Panel (secondary) ----- */
+.player-panel {
+  background: var(--surface);
+  border: 1px solid var(--border-visible);
+  border-radius: 16px;
+  padding: var(--space-lg);
+  margin-bottom: var(--space-xl);
 }
 
-.debug-panel pre {
-    margin: 0;
-    white-space: pre-wrap;
-    word-wrap: break-word;
+.player-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-sm);
 }
 
-/* --- 新增：播放器控制台样式 --- */
-.control-board {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 10px;
-    margin-top: 15px;
-    padding-top: 15px;
-    border-top: 1px dashed var(--dim-gray);
+.player-hero {
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: 48px;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--text-display);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.player-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--border);
 }
 
 .ctrl-btn {
-    background: transparent;
-    color: var(--accent-red);
-    border: 1px solid var(--accent-red);
-    padding: 5px 15px;
-    font-size: 1.2rem;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: var(--space-sm) var(--space-md);
+  transition: color var(--dur-fast) var(--ease-out);
+  min-height: 44px;
 }
 
 .ctrl-btn:hover {
-    background: var(--accent-red);
-    color: var(--bg-color);
+  color: var(--text-primary);
 }
 
-.play-btn {
-    font-weight: bold;
-    min-width: 120px;
+.ctrl-play {
+  background: var(--text-display);
+  color: var(--black);
+  border-radius: 999px;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  min-height: unset;
+  transition: background var(--dur-fast) var(--ease-out);
 }
 
-.mode-btn {
-    color: var(--fg-color);
-    border-color: var(--fg-color);
-    margin-right: auto; /* 把模式按钮推到最左边 */
+.ctrl-play:hover {
+  background: var(--text-primary);
+  color: var(--black);
 }
 
-.mode-btn:hover {
-    background: var(--fg-color);
-    color: var(--bg-color);
+/* ----- Input Area (secondary) ----- */
+.input-area {
+  padding-top: var(--space-xl);
+  border-top: 1px solid var(--border);
 }
 
-@keyframes blink { 50% { opacity: 0; } }
+.input-group {
+  display: flex;
+  gap: var(--space-md);
+  align-items: center;
+}
+
+.input-group input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border-visible);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 16px;
+  padding: var(--space-sm) 0;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.input-group input::placeholder {
+  color: var(--text-disabled);
+  font-family: var(--font-body);
+}
+
+.input-group input:focus {
+  border-bottom-color: var(--text-primary);
+}
+
+.send-btn {
+  background: var(--text-display);
+  color: var(--black);
+  border: none;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 12px 24px;
+  cursor: pointer;
+  min-height: 44px;
+  transition: opacity var(--dur-fast) var(--ease-out);
+  white-space: nowrap;
+}
+
+.send-btn:hover {
+  opacity: 0.85;
+}
+
+.send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ----- Debug Panel (tertiary) ----- */
+.debug-panel {
+  margin-top: var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--border-visible);
+  border-radius: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.debug-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-sm);
+}
+
+.debug-panel pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  margin: 0;
+}
+
+/* ----- Animations ----- */
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}

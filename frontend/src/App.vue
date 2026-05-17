@@ -1,10 +1,10 @@
 <script setup>
-import { ref, nextTick } from 'vue'
+import { ref, nextTick, onMounted } from 'vue'
 
 // Reactive state
 const userInput = ref('')
-const responseText = ref('> SYSTEM READY. AWAITING COMMAND.')
-const responseColor = ref('#ffffff')
+const responseText = ref('[READY]')
+const responseColor = ref('var(--text-disabled)')
 const isProcessing = ref(false)
 const showPlayer = ref(false)
 const showDebug = ref(false)
@@ -16,6 +16,20 @@ const fadeGain = ref(null)  // AudioContext gain node for smooth transitions
 let currentPlayingTrack = "None"
 let audioCtx = null
 let fadeTimer = null
+
+const theme = ref('dark')
+const toggleTheme = () => {
+  theme.value = theme.value === 'dark' ? 'light' : 'dark'
+  document.documentElement.setAttribute('data-theme', theme.value)
+  localStorage.setItem('theme', theme.value)
+}
+onMounted(() => {
+  const saved = localStorage.getItem('theme')
+  if (saved) {
+    theme.value = saved
+    document.documentElement.setAttribute('data-theme', saved)
+  }
+})
 
 // Player control state
 const isPlaying = ref(false)
@@ -103,7 +117,7 @@ const sendCommand = async () => {
 
   userInput.value = ''
   isProcessing.value = true
-  responseColor.value = '#888'
+  responseColor.value = 'var(--text-disabled)'
   responseText.value = '> '
   showPlayer.value = false
   // Clear typewriter queue
@@ -157,7 +171,7 @@ const sendCommand = async () => {
     }
 
   } catch (error) {
-    responseColor.value = 'var(--accent-red)'
+    responseColor.value = 'var(--accent)'
     responseText.value = "> CONNECTION ERROR: " + error.message
   } finally {
     isProcessing.value = false
@@ -192,7 +206,7 @@ const handleSSE = (event, data) => {
   switch (event) {
     case "token":
       // Buffer tokens and type out at controlled speed
-      responseColor.value = '#ffffff'
+      responseColor.value = 'var(--text-primary)'
       for (const ch of data) {
         typeQueue.push(ch)
       }
@@ -202,7 +216,7 @@ const handleSSE = (event, data) => {
     case "text":
       // Clean answer fallback (if streaming missed tokens)
       if (responseText.value === '> ') {
-        responseColor.value = '#ffffff'
+        responseColor.value = 'var(--text-primary)'
         responseText.value = "> " + data
       }
       break
@@ -236,7 +250,7 @@ const handleSSE = (event, data) => {
       break
 
     case "error":
-      responseColor.value = 'var(--accent-red)'
+      responseColor.value = 'var(--accent)'
       responseText.value += "\n> ERROR: " + data
       break
   }
@@ -244,48 +258,56 @@ const handleSSE = (event, data) => {
 </script>
 
 <template>
-  <div class="container">
-    <div class="header">Aud.IO</div>
-
-    <div class="display-box">
-      <span :style="{ color: responseColor }" style="white-space: pre-wrap;">{{ responseText }}</span>
-      <span class="cursor"></span>
-    </div>
-
-    <div class="input-group">
-      <input
-        type="text"
-        v-model="userInput"
-        @keypress.enter="sendCommand"
-        placeholder="TYPE YOUR REQUEST..."
-        autocomplete="off"
-      >
-      <button :disabled="isProcessing" @click="sendCommand">
-        {{ isProcessing ? 'STREAMING...' : 'EXECUTE' }}
-      </button>
-    </div>
-
-    <div class="player-panel" v-show="showPlayer">
-      <div style="font-size: 1.2rem; color: #888; margin-bottom: 5px;">NOW PLAYING:</div>
-      <div class="track-info">{{ trackName }}</div>
-
-      <div class="control-board">
-        <button class="ctrl-btn mode-btn" @click="toggleMode" title="Toggle mode">
-          MODE: [{{ playMode.toUpperCase() }}]
+  <div class="app">
+    <nav class="toolbar">
+      <span class="brand">AUD.IO</span>
+      <div class="toolbar-actions">
+        <button class="toolbar-btn" @click="showDebug = !showDebug">
+          {{ showDebug ? '[HIDE]' : '[DEBUG]' }}
         </button>
-        <button class="ctrl-btn" @click="prevTrack" title="Previous">|◀◀</button>
-        <button class="ctrl-btn play-btn" @click="togglePlay">
-          {{ isPlaying ? '■ PAUSE' : '▶ PLAY' }}
+        <button class="toolbar-btn" @click="toggleTheme">
+          {{ theme === 'dark' ? '[LIGHT]' : '[DARK]' }}
         </button>
-        <button class="ctrl-btn" @click="nextTrack" title="Next">▶▶|</button>
       </div>
+    </nav>
 
-      <audio ref="audioElement" @ended="onAudioEnded" crossorigin="anonymous"></audio>
-    </div>
+    <main class="response-area">
+      <p class="response-text" :style="{ color: responseColor }">{{ responseText }}<span class="cursor"></span></p>
+    </main>
+
+    <section class="player-panel" v-show="showPlayer">
+      <div class="player-label">NOW PLAYING</div>
+      <div class="player-hero">{{ trackName }}</div>
+      <div class="player-controls">
+        <button class="ctrl-btn" @click="toggleMode">MODE: {{ playMode.toUpperCase() }}</button>
+        <button class="ctrl-btn" @click="prevTrack">PREV</button>
+        <button class="ctrl-btn ctrl-play" @click="togglePlay">
+          {{ isPlaying ? '■' : '▶' }}
+        </button>
+        <button class="ctrl-btn" @click="nextTrack">NEXT</button>
+      </div>
+    </section>
+
+    <footer class="input-area">
+      <div class="input-group">
+        <input
+          type="text"
+          v-model="userInput"
+          @keypress.enter="sendCommand"
+          placeholder="What do you want to hear?"
+          autocomplete="off"
+        >
+        <button class="send-btn" :disabled="isProcessing" @click="sendCommand">
+          {{ isProcessing ? '...' : 'SEND' }}
+        </button>
+      </div>
+    </footer>
 
     <div class="debug-panel" v-show="showDebug">
-      <div style="font-size: 0.9rem; margin-bottom: 10px; border-bottom: 1px solid var(--accent-red); padding-bottom: 5px;">[ RAW DATA DUMP ]</div>
+      <div class="debug-label">RAW DATA</div>
       <pre>{{ jsonDump }}</pre>
     </div>
+
+    <audio ref="audioElement" @ended="onAudioEnded" crossorigin="anonymous"></audio>
   </div>
 </template>

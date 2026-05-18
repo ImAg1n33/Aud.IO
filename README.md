@@ -1,120 +1,145 @@
 # Aud.IO
 
-Aud.IO 是一个具备 FastAPI 后端与前端界面的 AI 语音助手项目。
+AI 音乐 DJ 助手 —— FastAPI 后端 + Vue 3 前端，具备流式 LLM 对话、语义情节记忆、网易云音乐播放和 Nothing Design 风格界面。
+
+## 技术栈
+
+| 层 | 技术 | 说明 |
+|----|------|------|
+| 前端 | Vue 3 (Composition API) + Vite 8 | Nothing Design 风格，打字机流式 UI + Web Audio 播放器 |
+| 后端 | FastAPI + Uvicorn | 异步 SSE 流式响应，Perceive→Decide→Execute→Record 编排管道 |
+| LLM | DeepSeek API (OpenAI 兼容协议) | 流式逐字输出，---JSON--- 标记分隔结构 |
+| 向量记忆 | ChromaDB + ONNX all-MiniLM-L6-v2 | 本地离线向量嵌入，语义检索替代关键词 mood 映射 |
+| 情节记忆 | SQLite (双写兼容) | ChromaDB 写入同步双写到 SQLite，支持 SQL 聚合统计 |
+| 用户画像 | Pydantic + JSON Patch | LLM 驱动的异步画像更新，原子写入防损坏 |
+| 音乐服务 | NetEase Cloud Music Unblocked API | 第三方网易云 API，搜索 + MP3 URL 获取 + 版权重试 |
+| 测试 | pytest + pytest-asyncio | 114 个测试用例，覆盖全部核心模块 |
 
 ## 项目结构
 
-- backend: FastAPI 接口、智能体编排、记忆上下文与工具封装
-   - backend/api: 路由层
-   - backend/services: 业务编排层
-- frontend: 前端 UI（建议 Vue 3 或 React，Nothing Design 风格）
-- docs: 架构说明与 API 文档
+```
+Aud.IO/
+├── backend/
+│   ├── main.py                         # FastAPI 应用入口 + CORS
+│   ├── api/routes_agent.py             # POST /v1/agent/respond + /respond/stream (SSE)
+│   ├── services/assistant_service.py   # ★ 核心编排：Perceive→Decide→Execute→Record
+│   ├── agent/
+│   │   ├── llm_client.py              # LLM 调用 + 流式重试（连接级/推流级区分）
+│   │   ├── prompt_builder.py          # 系统提示词模板
+│   │   ├── context_assembler.py       # ★ 插件式上下文组装（5 个 Provider）
+│   │   ├── intent_classifier.py       # 规则引擎意图分类（零 LLM 成本）
+│   │   ├── tool_executor.py           # 工具调度（重试 + 版权兜底）
+│   │   └── memory_manager.py          # JSON Patch 驱动用户画像异步更新
+│   ├── memory/
+│   │   ├── episodic_memory.py         # ★ ChromaDB + SQLite 双写情节记忆 + MoodDetector
+│   │   ├── embedding.py               # 向量嵌入抽象层（本地 ONNX / 远端 API）
+│   │   ├── conversation_memory.py     # 短期对话记忆（内存环形缓冲，max 20 turns）
+│   │   └── profile_schema.py          # Pydantic 用户画像模型 + 原子写入
+│   └── tools/
+│       ├── base.py                    # 工具抽象层（BaseTool, ToolRegistry）
+│       ├── music_tool.py              # 网易云音乐搜索 + MP3 URL 获取
+│       ├── netease_api.py             # 网易云 Unblocked API 低层封装
+│       ├── login_netease.py           # 网易云扫码登录脚本
+│       ├── weather.py                 # 天气工具（桩）
+│       └── tts.py                     # TTS 工具（桩）
+├── frontend/
+│   ├── vite.config.js                 # Vite 构建配置 + /api 代理
+│   └── src/
+│       ├── App.vue                    # ★ 全部 UI：终端风输入 + SSE 流式 + 音频播放器
+│       └── style.css                  # Nothing Design 暗/亮双模式样式
+├── tests/                             # pytest 测试套件（114 cases）
+├── docs/                              # 架构文档 + API 文档 + 安全手册
+├── scripts/security_scan.py           # API Key 泄露扫描
+└── .github/workflows/ci.yml           # CI：pytest + 安全扫描
+```
 
 ## 快速开始
 
-1. 创建并激活 Python 虚拟环境。
+1. 创建 Python 虚拟环境并激活
 2. 安装后端依赖：
-   - pip install -r backend/requirements.txt
-3. 复制环境变量模板：
-   - copy backend/.env.example backend/.env
-4. （可选）复制本地记忆模板：
-   - copy backend/memory/taste.example.md backend/memory/taste.md
-   - copy backend/memory/routines.example.md backend/memory/routines.md
-5. 启动 API 服务：
-   - uvicorn backend.main:app --reload --port 8001
+   ```
+   pip install -r backend/requirements.txt
+   ```
+3. 配置环境变量：
+   ```
+   copy backend/.env.example backend/.env
+   ```
+   编辑 `.env` 填入 LLM API Key（必填）和网易云 Cookie（音乐播放必填）
+4. 启动后端：
+   ```
+   uvicorn backend.main:app --reload --port 8001
+   ```
+5. 启动前端（新终端）：
+   ```
+   cd frontend && npm install && npm run dev
+   ```
+6. 打开浏览器访问 `http://localhost:5173`
+
+## 记忆系统架构 (v2.0)
+
+| 层级 | 组件 | 存储 | 说明 |
+|------|------|------|------|
+| 短期记忆 | ConversationMemory | 内存环形缓冲 (max 20) | 当前会话对话历史 |
+| 情节记忆 (主) | EpisodicMemory → ChromaDB | `chroma_episodes/` | 向量语义检索，自动 mood 检测 |
+| 情节记忆 (兼容) | EpisodicMemory → SQLite | `episodes.db` | 双写兼容，SQL 聚合统计 |
+| 用户画像 | MemoryManager → JSON Patch | `user_profile.json` | LLM 驱动的异步偏好更新 |
+
+**语义检索工作流：**
+1. 用户输入 → MoodDetector 中英文关键词检测（50+ 词表，<1ms） → 自动打 mood_tag
+2. 用户输入 → 本地 ONNX 模型向量化（384 维） → ChromaDB 余弦相似度检索
+3. 检索结果 → EpisodicMemoryProvider 注入 LLM 上下文，增强推荐个性化
+
+**ChromaDB 模式：**
+- 默认离线：`all-MiniLM-L6-v2` ONNX 模型（~80MB，首次自动下载）
+- 可选远端：设置 `EMBEDDING_PROVIDER=api`，走 OpenAI 兼容 `/embeddings` 端点
+
+## API 路由
+
+| 方法 | 路由 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查 |
+| GET | `/ready` | 就绪检查 |
+| POST | `/v1/agent/respond` | 标准响应（非流式，JSON） |
+| POST | `/v1/agent/respond/stream` | **SSE 流式响应**（打字机效果 + 音乐播放） |
+
+### SSE 事件类型
+
+```
+event: token  → 逐字打字机流（28ms/字 速度控制）
+event: text   → 完整回复文本（替换显示）
+event: music  → JSON 音乐对象（触发播放 + Web Audio 淡入淡出）
+event: error  → 错误消息（区分连接失败 / 流式中断）
+event: done   → JSON 完整响应（debug 面板）
+```
 
 ## 测试
 
-1. 安装开发依赖：
-   - pip install -r requirements-dev.txt
-2. 运行测试：
-   - pytest
-
-当前测试覆盖：
-
-- CORS 解析逻辑
-- Agent 路由响应协议
-- Assistant 服务编排
-- MemoryManager 异步 JSON Patch 更新流程
+```
+pip install -r requirements-dev.txt
+pytest                                  # 114 个测试用例
+```
 
 ## CI
 
-GitHub Actions 配置位于：
+GitHub Actions（`.github/workflows/ci.yml`）：push 到 main 或 PR 时触发 pytest + 安全扫描。
 
-- .github/workflows/ci.yml
+## LLM 配置
 
-触发条件：push 到 main 或 PR。执行内容：
+在 `.env` 中通过通用环境变量适配不同 LLM 提供商：
 
-1. pytest
-2. scripts/security_scan.py
+```
+LLM_PROVIDER=deepseek
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-chat
+LLM_API_KEY=your_key_here
+```
 
-## LLM 环境策略（开源友好）
+支持的提供商：DeepSeek、OpenAI、Anthropic（需实现对应的 LLM Provider 适配层）。
 
-在 backend/.env.example 中使用通用的环境变量格式：
+## 安全
 
-- LLM_PROVIDER
-- LLM_BASE_URL
-- LLM_MODEL
-- LLM_API_KEY
-
-推荐理由：
-
-- 统一适配 DeepSeek、OpenAI、Anthropic 以及后续模型
-- 协作者更容易上手
-- 只提交 backend/.env.example，backend/.env 保持本地
-
-### DeepSeek 本地示例
-
-在 backend/.env 中配置：
-
-- LLM_PROVIDER=deepseek
-- LLM_BASE_URL=https://api.deepseek.com
-- LLM_MODEL=deepseek-chat
-- LLM_API_KEY=your_real_deepseek_key
-
-当 LLM_API_KEY 为空时，也可以使用 DEEPSEEK_API_KEY 作为兜底。
-
-### CORS 白名单
-
-- 在 backend/.env 中配置 `CORS_ALLOW_ORIGINS`，用逗号分隔。
-- 默认包含常见本地开发端口与 `null`（用于 file:// 本地打开页面的场景）。
-
-## 开源安全清单
-
-- 不要提交任何 API Key（Claude/Fish Audio/OpenAI 等）。
-- 真实凭据仅保留在本地 .env。
-- 只提交 backend/.env.example 作为模板。
-- 个人记忆文件保持本地，例如 backend/memory/taste.md。
-- 推送前运行 git status，确认没有敏感文件被暂存。
-
-详细运行手册：
-
-- docs/security-playbook.md
-
-提交前扫描：
-
-- VS Code 任务：Scan Secrets (Tracked Files)
-
-Pre-commit 保护：
-
-- VS Code 任务：Install Git Hooks（每个仓库只需执行一次）
-- Hook 文件：.githooks/pre-commit
-
-## 初始 API 路由
-
-- GET /health
-- GET /ready
-- POST /v1/agent/respond
-   - reply 为严格 JSON 对象，包含字段：
-      - analysis: string
-      - answer: string
-      - actions: string[]
-      - provider: string
-      - model: string
-
-## 后续迭代计划
-
-- 在 backend/agent/llm_client.py 中接入真实模型调用
-- 在 backend/tools 中实现 NetEase、天气与 TTS 工具
-- 构建前端界面并接入 API
-- 扩展架构文档与时序图
+- **绝不提交** API Key、`.env`、`user_profile.json`、`episodes.db`、`chroma_episodes/`、`memory_update.log`
+- 只提交 `.env.example` 作为模板
+- Pre-commit hook（`.githooks/pre-commit`）拦截敏感文件
+- `scripts/security_scan.py` 可手动扫描
+- 详见 `docs/security-playbook.md`

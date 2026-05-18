@@ -197,16 +197,26 @@ IMPORTANT: The JSON part must be valid JSON on a single line after the ---JSON--
 
 
 async def stream_llm(
-    prompt: str, model: str | None = None
+    prompt: str,
+    model: str | None = None,
+    max_retries: int = 2,
+    timeout: float = 30.0,
 ) -> AsyncGenerator[str | dict[str, Any], None]:
-    """Stream LLM response: yields natural text tokens, then a final dict.
+    """Stream LLM response with retry logic for connection failures.
 
-    The LLM outputs natural text first (streamed to user), then a JSON block
-    after a ---JSON--- marker for structured parsing.
+    重试策略（区分两种失败场景）:
+    - 场景 A「连接建立失败」: client.stream() 本身抛异常（TCP/TLS/HTTP 握手失败，
+      DNS 解析失败，连接超时等），此时尚未向 LLM 服务端发送完整请求体，
+      且前端没有收到任何 token —— **安全重试**
+    - 场景 B「推流中途中断」: 连接已建立，但在 aiter_lines() 迭代过程中中断。
+      此时前端可能已渲染部分打字机文本，重试会导致重复/覆盖显示 —— **不重试，
+      直接上报错误**
+
+    同时顺便修复架构报告 #4.1.4 / #4.1.5 —— timeout 从硬编码改为参数。
 
     Yields:
         str  — answer text tokens (typewriter stream)
-        dict — final structured reply
+        dict — final structured reply (含 stream_interrupted=True 标记中断场景)
     """
     config = _get_llm_config(model_override=model)
 
@@ -234,89 +244,132 @@ async def stream_llm(
     }
 
     MARKER = "---JSON---"
-    full_content = ""
-    in_json = False
-    json_buffer = ""
-    text_output = ""  # confirmed clean text already sent to client
-    text_pending = ""  # last N chars buffered to catch partial marker
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async with client.stream(
-                "POST",
-                endpoint,
-                json=body,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {config['api_key']}",
-                },
-            ) as response:
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data_str = line[6:]
-                    if data_str.strip() == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data_str)
-                        delta = (
-                            chunk.get("choices", [{}])[0]
-                            .get("delta", {})
-                            .get("content", "")
-                        )
-                    except (json.JSONDecodeError, KeyError, IndexError):
-                        continue
-                    if not delta:
-                        continue
-                    full_content += delta
+    for attempt in range(max_retries + 1):
+        # ---- 每次重试都重置的流式状态 ----
+        full_content = ""
+        in_json = False
+        json_buffer = ""
+        text_output = ""   # 已安全发送给调用方的干净文本
+        text_pending = ""  # 缓冲区末尾 N 字符，用于防止 MARKER 部分泄露
+        connection_ok = False  # HTTP 连接是否已建立（收到响应头）
 
-                    if in_json:
-                        json_buffer += delta
-                    elif MARKER in full_content:
-                        # Split at marker — flush remaining text, then collect JSON
-                        parts = full_content.split(MARKER, 1)
-                        clean_text = parts[0]
-                        # Yield any text still pending (not yet sent)
-                        new_chars = clean_text[len(text_output):]
-                        if new_chars:
-                            yield new_chars
-                            text_output += new_chars
-                        in_json = True
-                        json_buffer = parts[1] if len(parts) > 1 else ""
-                    else:
-                        # Buffer last N chars to avoid leaking partial marker
-                        text_pending += delta
-                        safe_len = max(0, len(text_pending) - len(MARKER))
-                        if safe_len > 0:
-                            safe = text_pending[:safe_len]
-                            yield safe
-                            text_output += safe
-                            text_pending = text_pending[safe_len:]
-
-        # Parse JSON block
         try:
-            json_str = json_buffer.strip()
-            parsed = json.loads(json_str)
-            if not isinstance(parsed, dict):
-                raise ValueError("JSON is not a dict")
-        except (json.JSONDecodeError, ValueError):
-            # Fallback: try to extract JSON from full_content
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    endpoint,
+                    json=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {config['api_key']}",
+                    },
+                ) as response:
+                    # ====== 连接已建立 ======
+                    connection_ok = True
+
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            delta = (
+                                chunk.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content", "")
+                            )
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            continue
+                        if not delta:
+                            continue
+                        full_content += delta
+
+                        if in_json:
+                            json_buffer += delta
+                        elif MARKER in full_content:
+                            # 检测到 MARKER —— 清洗剩余文本，之后内容归入 JSON 缓冲
+                            parts = full_content.split(MARKER, 1)
+                            clean_text = parts[0]
+                            new_chars = clean_text[len(text_output):]
+                            if new_chars:
+                                yield new_chars
+                                text_output += new_chars
+                            in_json = True
+                            json_buffer = parts[1] if len(parts) > 1 else ""
+                        else:
+                            # 用滑动窗口防止 MARKER 部分泄露到前端显示
+                            text_pending += delta
+                            safe_len = max(0, len(text_pending) - len(MARKER))
+                            if safe_len > 0:
+                                safe = text_pending[:safe_len]
+                                yield safe
+                                text_output += safe
+                                text_pending = text_pending[safe_len:]
+
+            # ====== 流正常结束 —— 解析 JSON ======
             try:
-                parsed = _extract_json(full_content)
+                json_str = json_buffer.strip()
+                parsed = json.loads(json_str)
+                if not isinstance(parsed, dict):
+                    raise ValueError("JSON is not a dict")
             except (json.JSONDecodeError, ValueError):
-                parsed = {"analysis": "", "answer": full_content.split("---JSON---")[0][:200], "actions": [], "play_keyword": ""}
+                try:
+                    parsed = _extract_json(full_content)
+                except (json.JSONDecodeError, ValueError):
+                    parsed = {
+                        "analysis": "",
+                        "answer": full_content.split("---JSON---")[0][:200],
+                        "actions": [],
+                        "play_keyword": "",
+                    }
 
-        text_answer = full_content.split("---JSON---")[0].strip()
-        normalized = _normalize_response(parsed, config["provider"], config["model"])
-        normalized["answer"] = text_answer  # Use the natural text, not whatever JSON says
-        yield normalized
+            text_answer = full_content.split("---JSON---")[0].strip()
+            normalized = _normalize_response(parsed, config["provider"], config["model"])
+            normalized["answer"] = text_answer
+            normalized["stream_interrupted"] = False
+            yield normalized
+            return  # ← 成功，退出重试循环
 
-    except (httpx.HTTPError, httpx.TimeoutException, json.JSONDecodeError, ValueError) as exc:
-        yield {
-            "analysis": "Model call failed.",
-            "answer": "DeepSeek request failed, please check network/key/model settings.",
-            "actions": [str(exc)],
-            "play_keyword": "",
-            "provider": config["provider"],
-            "model": config["model"],
-        }
+        except (httpx.HTTPError, httpx.TimeoutException) as exc:
+            # ====== 场景 A: 连接未建立 → 安全重试 ======
+            if not connection_ok and attempt < max_retries:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "LLM stream connection failed (attempt %d/%d), retrying...: %s",
+                    attempt + 1, max_retries + 1, exc,
+                )
+                continue
+
+            # ====== 场景 B: 连接已建立但中途中断 → 不重试 ======
+            # 原因：前端可能已经渲染了部分打字机文本，重试会产生重复/覆盖的诡异体验
+            yield {
+                "analysis": "Model call failed.",
+                "answer": (
+                    "流式响应中断，请稍后重试。"
+                    if connection_ok
+                    else "无法连接到 LLM 服务，请检查网络和 API 配置。"
+                ),
+                "actions": [str(exc)],
+                "play_keyword": "",
+                "provider": config["provider"],
+                "model": config["model"],
+                "stream_interrupted": connection_ok,
+                "retries_exhausted": not connection_ok and attempt >= max_retries,
+            }
+            return
+
+        except (json.JSONDecodeError, ValueError) as exc:
+            # JSON 解析失败不属于网络问题，不重试
+            yield {
+                "analysis": "Model call failed.",
+                "answer": "LLM 返回格式异常，请重试。",
+                "actions": [str(exc)],
+                "play_keyword": "",
+                "provider": config["provider"],
+                "model": config["model"],
+                "stream_interrupted": False,
+            }
+            return

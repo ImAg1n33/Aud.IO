@@ -16,14 +16,12 @@ env/
 .env.*
 !.env.example
 
-# Local memory context (never commit personal profile files)
-backend/memory/*.md
-!backend/memory/*.example.md
-!backend/memory/README.md
-backend/qrcode.png
-backend/memory/memory_update.log
+# Local memory context (never commit personal data — these contain user interaction history)
 backend/memory/user_profile.json
 backend/memory/episodes.db
+backend/memory/memory_update.log
+backend/memory/chroma_episodes/
+backend/qrcode.png
 
 # Frontend
 node_modules/
@@ -33,6 +31,9 @@ coverage/
 # OS and editors
 .DS_Store
 Thumbs.db
+
+# Architecture diagnostic reports (local snapshots, periodically regenerated)
+docs/architecture-reports/
 
 # Claude Code (local workspace settings)
 .claude/

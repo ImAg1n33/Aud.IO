@@ -1,4 +1,10 @@
-"""Agent orchestration: Perceive -> Decide -> Execute -> Record pipeline."""
+"""Agent orchestration: Perceive -> Decide -> Execute -> Record pipeline.
+
+v2.0 升级:
+- EpisodicMemory 默认启用 ChromaDB 向量存储（本地 ONNX 模型，无需外网）
+- store_snapshot() 自动检测 mood_tag 并回填，无需调用方手动传参
+- 语义检索路径已在 EpisodicMemoryProvider 中生效
+"""
 
 import asyncio
 import json
@@ -20,6 +26,7 @@ from backend.agent.memory_manager import MemoryManager
 from backend.agent.prompt_builder import ENHANCED_SYSTEM_PERSONA, ENHANCED_TOOL_CONSTRAINTS
 from backend.agent.tool_executor import ToolExecutor
 from backend.memory.conversation_memory import ConversationMemory
+from backend.memory.embedding import EmbeddingProvider
 from backend.memory.episodic_memory import EpisodicMemory
 
 
@@ -30,12 +37,22 @@ class AssistantService:
         self,
         memory_manager: MemoryManager | None = None,
         episodic_db_path: Path | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
+        """初始化助理服务。
+
+        Args:
+            memory_manager: 用户画像管理器（None = 使用默认路径）
+            episodic_db_path: 情节记忆 SQLite 数据库路径（None = 默认路径）
+            embedding_provider: 向量嵌入提供者（None = 根据环境变量自动选择）
+        """
         backend_root = Path(__file__).resolve().parents[1]
         self.memory_manager = memory_manager or MemoryManager()
         self.short_term_memory = ConversationMemory(max_turns=20)
+        # ChromaDB 双写架构：EpisodicMemory 内部自动管理 SQLite + ChromaDB
         self.episodic_memory = EpisodicMemory(
-            episodic_db_path or (backend_root / "memory" / "episodes.db")
+            db_path=episodic_db_path or (backend_root / "memory" / "episodes.db"),
+            embedding_provider=embedding_provider,
         )
         self.episodic_provider = EpisodicMemoryProvider(self.episodic_memory)
         self.intent_classifier = IntentClassifier()
@@ -138,8 +155,10 @@ class AssistantService:
 
         prompt = await self.context_assembler.assemble(user_input, intent, metadata)
 
-        # === DECIDE (streaming) ===
+        # === DECIDE (streaming with retry) ===
+        # stream_llm() 内部已处理连接重试，此处只区分成功/中断两种结果
         reply: dict[str, Any] = {}
+        stream_interrupted: bool = False
 
         async for chunk in stream_llm(prompt):
             if isinstance(chunk, str):
@@ -147,8 +166,19 @@ class AssistantService:
             elif isinstance(chunk, dict):
                 reply = chunk
                 if reply.get("analysis") == "Model call failed.":
-                    yield self._sse("error", reply.get("answer", "Request failed"))
+                    stream_interrupted = reply.get("stream_interrupted", False)
+                    # 场景 B（中途中断）: 前端已渲染部分文本，不发送 text 事件覆盖
+                    # 场景 A（连接失败）: 前端未收到任何 token，直接报错
+                    error_msg = reply.get("answer", "Request failed")
+                    if stream_interrupted:
+                        # 保留前端已有的打字机文本，仅追加错误提示
+                        yield self._sse("error", error_msg)
+                    else:
+                        yield self._sse("error", error_msg)
                     return
+
+        if stream_interrupted or reply.get("analysis") == "Model call failed.":
+            return  # 已在上面处理，防御性返回
 
         # Send clean answer text for display replacement
         yield self._sse("text", reply.get("answer", ""))

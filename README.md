@@ -9,11 +9,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Vue-3-4FC08D?logo=vue.js&logoColor=white" alt="Vue 3">
-  <img src="https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white" alt="FastAPI">
-  <img src="https://img.shields.io/badge/ChromaDB-向量记忆-FF6B6B?logo=chromadb&logoColor=white" alt="ChromaDB">
-  <img src="https://img.shields.io/badge/DeepSeek-LLM-4D6BFE?logo=openai&logoColor=white" alt="DeepSeek">
-  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
+  <img src="https://img.shields.io/badge/Vue.js-3.x-4FC08D?style=flat-square&logo=vue.js&logoColor=white" alt="Vue 3">
+  <img src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/ChromaDB-Vector_Memory-FF6F00?style=flat-square&logo=database&logoColor=white" alt="ChromaDB">
+  <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square" alt="PRs Welcome">
+  <img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License">
 </p>
 
 ---

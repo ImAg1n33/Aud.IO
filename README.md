@@ -1,145 +1,184 @@
+<p align="center">
+  <img src="./docs/screenshot.png" alt="Aud.IO UI Screenshot" width="100%">
+</p>
+
 # Aud.IO
 
-AI 音乐 DJ 助手 —— FastAPI 后端 + Vue 3 前端，具备流式 LLM 对话、语义情节记忆、网易云音乐播放和 Nothing Design 风格界面。
+<p align="center">
+  <b>AI 音乐 DJ —— 懂你心情、记得你口味、陪你聊天的智能电台</b>
+</p>
 
-## 技术栈
+<p align="center">
+  <img src="https://img.shields.io/badge/Vue-3-4FC08D?logo=vue.js&logoColor=white" alt="Vue 3">
+  <img src="https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/ChromaDB-向量记忆-FF6B6B?logo=chromadb&logoColor=white" alt="ChromaDB">
+  <img src="https://img.shields.io/badge/DeepSeek-LLM-4D6BFE?logo=openai&logoColor=white" alt="DeepSeek">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
+</p>
 
-| 层 | 技术 | 说明 |
-|----|------|------|
-| 前端 | Vue 3 (Composition API) + Vite 8 | Nothing Design 风格，打字机流式 UI + Web Audio 播放器 |
-| 后端 | FastAPI + Uvicorn | 异步 SSE 流式响应，Perceive→Decide→Execute→Record 编排管道 |
-| LLM | DeepSeek API (OpenAI 兼容协议) | 流式逐字输出，---JSON--- 标记分隔结构 |
-| 向量记忆 | ChromaDB + ONNX all-MiniLM-L6-v2 | 本地离线向量嵌入，语义检索替代关键词 mood 映射 |
-| 情节记忆 | SQLite (双写兼容) | ChromaDB 写入同步双写到 SQLite，支持 SQL 聚合统计 |
-| 用户画像 | Pydantic + JSON Patch | LLM 驱动的异步画像更新，原子写入防损坏 |
-| 音乐服务 | NetEase Cloud Music Unblocked API | 第三方网易云 API，搜索 + MP3 URL 获取 + 版权重试 |
-| 测试 | pytest + pytest-asyncio | 114 个测试用例，覆盖全部核心模块 |
+---
 
-## 项目结构
+## ✨ 核心特性
+
+<table>
+  <tr>
+    <td width="50%">
+      <h3>🎧 AI DJ 对话</h3>
+      <p>不是冷冰冰的播放器指令，而是像电台 DJ 一样的自然对话。说一句"来点轻松的爵士"，Aud.IO 理解你的语境，用打字机效果逐字说出推荐理由，然后自动搜索并播放。</p>
+    </td>
+    <td width="50%">
+      <h3>🧠 语义记忆</h3>
+      <p>记住你喜欢过什么、什么心情下听过什么、常在什么时候打开它。即使你说"来点上次那种感觉的"，它也能从向量记忆库中找回最相关的那次交互。</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h3>🎨 Nothing Design</h3>
+      <p>受 Nothing 品牌美学启发的双模式界面 —— 暗色模式的深邃哑光黑、亮色模式的通透冷白，三层视觉层级、无衬线字体、低饱和度色彩，让音乐成为唯一的焦点。</p>
+    </td>
+    <td>
+      <h3>⚡ 流式响应</h3>
+      <p>基于 SSE (Server-Sent Events) 的逐字流式输出，配合 Web Audio API 的淡入淡出过渡。连接中断自动重试，推流中途断开则优雅保留已输出文本。</p>
+    </td>
+  </tr>
+</table>
+
+---
+
+## 🏗️ 全栈架构
+
+```
+用户输入 → 意图分类 → 上下文组装 (5 个 Provider 插件) → LLM 流式推理
+                                                              ↓
+    ← SSE 打字机流 + 音乐播放 ← 工具执行 (网易云搜索 + 版权重试) ←
+                                                              ↓
+                      情节记忆双写 (ChromaDB 向量 + SQLite 兼容)
+```
+
+| 层 | 技术选型 | 为什么 |
+|----|----------|--------|
+| 前端 | Vue 3 + Vite 8 | 轻量 SPA，无组件库依赖，纯手写 CSS |
+| 后端 | FastAPI + Uvicorn | 异步原生支持，SSE 流式零额外开销 |
+| LLM | DeepSeek（OpenAI 兼容协议） | 低成本、流式输出、中文理解出色 |
+| 向量记忆 | ChromaDB + ONNX all-MiniLM-L6-v2 | 完全本地离线，零网络依赖，首次自动下载 ~80MB 模型 |
+| 情节记忆 | SQLite（双写兼容） | 嵌入式零配置，SQL 聚合统计补充向量检索 |
+| 音乐服务 | NetEase Cloud Music API | 曲库覆盖广，支持扫码登录 |
+
+---
+
+## 🚀 5 分钟跑起来
+
+### 前置条件
+
+- Python 3.11+（推荐 Conda 环境）
+- Node.js 18+
+- [可选] 本地运行的 [NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) 实例（音乐播放需要）
+
+### 安装 & 启动
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/ImAg1n33/Aud.IO.git
+cd Aud.IO
+
+# 2. 后端
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r backend/requirements.txt
+cp backend/.env.example backend/.env                  # 编辑填入 LLM_API_KEY
+
+uvicorn backend.main:app --reload --port 8001
+
+# 3. 前端（新终端）
+cd frontend && npm install && npm run dev
+
+# 4. 打开 http://localhost:5173
+```
+
+---
+
+## 📂 项目导览
 
 ```
 Aud.IO/
 ├── backend/
-│   ├── main.py                         # FastAPI 应用入口 + CORS
-│   ├── api/routes_agent.py             # POST /v1/agent/respond + /respond/stream (SSE)
-│   ├── services/assistant_service.py   # ★ 核心编排：Perceive→Decide→Execute→Record
-│   ├── agent/
-│   │   ├── llm_client.py              # LLM 调用 + 流式重试（连接级/推流级区分）
-│   │   ├── prompt_builder.py          # 系统提示词模板
-│   │   ├── context_assembler.py       # ★ 插件式上下文组装（5 个 Provider）
-│   │   ├── intent_classifier.py       # 规则引擎意图分类（零 LLM 成本）
-│   │   ├── tool_executor.py           # 工具调度（重试 + 版权兜底）
-│   │   └── memory_manager.py          # JSON Patch 驱动用户画像异步更新
-│   ├── memory/
-│   │   ├── episodic_memory.py         # ★ ChromaDB + SQLite 双写情节记忆 + MoodDetector
-│   │   ├── embedding.py               # 向量嵌入抽象层（本地 ONNX / 远端 API）
-│   │   ├── conversation_memory.py     # 短期对话记忆（内存环形缓冲，max 20 turns）
-│   │   └── profile_schema.py          # Pydantic 用户画像模型 + 原子写入
-│   └── tools/
-│       ├── base.py                    # 工具抽象层（BaseTool, ToolRegistry）
-│       ├── music_tool.py              # 网易云音乐搜索 + MP3 URL 获取
-│       ├── netease_api.py             # 网易云 Unblocked API 低层封装
-│       ├── login_netease.py           # 网易云扫码登录脚本
-│       ├── weather.py                 # 天气工具（桩）
-│       └── tts.py                     # TTS 工具（桩）
+│   ├── main.py                          # 应用入口
+│   ├── api/routes_agent.py              # API 路由层
+│   ├── services/assistant_service.py    # ★ 核心编排管道
+│   ├── agent/                           # 智能体组件
+│   │   ├── llm_client.py               #   LLM 调用 + 流式重试
+│   │   ├── context_assembler.py        #   ★ 插件式上下文组装
+│   │   ├── intent_classifier.py        #   意图分类（规则引擎）
+│   │   ├── tool_executor.py            #   工具调度引擎
+│   │   └── memory_manager.py           #   用户画像异步更新
+│   ├── memory/                          # 记忆系统
+│   │   ├── episodic_memory.py          #   ★ ChromaDB 向量记忆 + MoodDetector
+│   │   ├── embedding.py                #   向量嵌入抽象层
+│   │   ├── conversation_memory.py      #   短期对话记忆
+│   │   └── profile_schema.py           #   用户画像模型
+│   └── tools/                           # 工具层
+│       ├── music_tool.py               #   网易云音乐搜索 & 播放
+│       ├── netease_api.py              #   网易云 API 封装
+│       └── login_netease.py            #   扫码登录
 ├── frontend/
-│   ├── vite.config.js                 # Vite 构建配置 + /api 代理
+│   ├── vite.config.js                   # Vite 配置 + API 代理
 │   └── src/
-│       ├── App.vue                    # ★ 全部 UI：终端风输入 + SSE 流式 + 音频播放器
-│       └── style.css                  # Nothing Design 暗/亮双模式样式
-├── tests/                             # pytest 测试套件（114 cases）
-├── docs/                              # 架构文档 + API 文档 + 安全手册
-├── scripts/security_scan.py           # API Key 泄露扫描
-└── .github/workflows/ci.yml           # CI：pytest + 安全扫描
+│       ├── App.vue                      # ★ 完整 UI：打字机 + 音频播放器
+│       └── style.css                    # Nothing Design 暗/亮双模式
+├── tests/                               # pytest 测试套件
+├── docs/                                # 架构文档 & API 文档
+└── .github/workflows/ci.yml             # CI 自动测试 + 安全扫描
 ```
 
-## 快速开始
+---
 
-1. 创建 Python 虚拟环境并激活
-2. 安装后端依赖：
-   ```
-   pip install -r backend/requirements.txt
-   ```
-3. 配置环境变量：
-   ```
-   copy backend/.env.example backend/.env
-   ```
-   编辑 `.env` 填入 LLM API Key（必填）和网易云 Cookie（音乐播放必填）
-4. 启动后端：
-   ```
-   uvicorn backend.main:app --reload --port 8001
-   ```
-5. 启动前端（新终端）：
-   ```
-   cd frontend && npm install && npm run dev
-   ```
-6. 打开浏览器访问 `http://localhost:5173`
+## 🧪 质量保障
 
-## 记忆系统架构 (v2.0)
+| 维度 | 实践 |
+|------|------|
+| 测试 | pytest + pytest-asyncio，覆盖核心编排管道、记忆系统、工具调度、意图分类 |
+| CI | GitHub Actions 自动运行测试 + API Key 泄露扫描 |
+| 安全 | Pre-commit Hook 拦截敏感文件提交，`.gitignore` 保护个人数据 |
+| 容错 | LLM 流式中断优雅降级，版权歌曲自动换曲重试，ChromaDB → SQLite 查询自动 fallback |
 
-| 层级 | 组件 | 存储 | 说明 |
-|------|------|------|------|
-| 短期记忆 | ConversationMemory | 内存环形缓冲 (max 20) | 当前会话对话历史 |
-| 情节记忆 (主) | EpisodicMemory → ChromaDB | `chroma_episodes/` | 向量语义检索，自动 mood 检测 |
-| 情节记忆 (兼容) | EpisodicMemory → SQLite | `episodes.db` | 双写兼容，SQL 聚合统计 |
-| 用户画像 | MemoryManager → JSON Patch | `user_profile.json` | LLM 驱动的异步偏好更新 |
+---
 
-**语义检索工作流：**
-1. 用户输入 → MoodDetector 中英文关键词检测（50+ 词表，<1ms） → 自动打 mood_tag
-2. 用户输入 → 本地 ONNX 模型向量化（384 维） → ChromaDB 余弦相似度检索
-3. 检索结果 → EpisodicMemoryProvider 注入 LLM 上下文，增强推荐个性化
+## 🚀 路线图
 
-**ChromaDB 模式：**
-- 默认离线：`all-MiniLM-L6-v2` ONNX 模型（~80MB，首次自动下载）
-- 可选远端：设置 `EMBEDDING_PROVIDER=api`，走 OpenAI 兼容 `/embeddings` 端点
+- [x] LLM 流式对话 + SSE 打字机效果
+- [x] 网易云音乐搜索 & 播放
+- [x] Nothing Design 暗/亮双模式 UI
+- [x] ChromaDB 向量语义记忆 + 自动心情检测
+- [ ] 天气感知推荐（代码已预留接口）
+- [ ] TTS 语音合成播报（代码已预留接口）
+- [ ] Docker 一键部署
+- [ ] 多用户会话隔离
+- [ ] 网页端管理后台
 
-## API 路由
+---
 
-| 方法 | 路由 | 说明 |
-|------|------|------|
-| GET | `/health` | 健康检查 |
-| GET | `/ready` | 就绪检查 |
-| POST | `/v1/agent/respond` | 标准响应（非流式，JSON） |
-| POST | `/v1/agent/respond/stream` | **SSE 流式响应**（打字机效果 + 音乐播放） |
+## 🤝 扩展 & 贡献
 
-### SSE 事件类型
+Aud.IO 的 Agent 管道采用 **插件式架构**，扩展新能力非常自然：
 
-```
-event: token  → 逐字打字机流（28ms/字 速度控制）
-event: text   → 完整回复文本（替换显示）
-event: music  → JSON 音乐对象（触发播放 + Web Audio 淡入淡出）
-event: error  → 错误消息（区分连接失败 / 流式中断）
-event: done   → JSON 完整响应（debug 面板）
+- **接入新 LLM**：实现 OpenAI 兼容协议的任意模型均可直接使用（当前跑通 DeepSeek）；其他协议需在 `llm_client.py` 中增加适配层
+- **接入新工具**：继承 `BaseTool`，在 `ToolRegistry` 中注册即可被 LLM 自动发现和调用
+- **接入新上下文**：实现 `ContextProvider` 接口，注入到 `ContextAssembler` 的 Provider 列表即可参与 Prompt 组装
+
+```python
+# 添加一个新的上下文来源 —— 就这么简单
+class WeatherProvider(ContextProvider):
+    name = "weather"
+    async def get_context(self, intent, user_input, metadata):
+        weather = await fetch_weather()
+        return f"[当前天气]\n{weather}  # LLM 会自动理解并利用这段信息"
+
+assembler.providers.append(WeatherProvider())
 ```
 
-## 测试
+欢迎提 Issue 和 PR。
 
-```
-pip install -r requirements-dev.txt
-pytest                                  # 114 个测试用例
-```
+---
 
-## CI
+## 📄 License
 
-GitHub Actions（`.github/workflows/ci.yml`）：push 到 main 或 PR 时触发 pytest + 安全扫描。
-
-## LLM 配置
-
-在 `.env` 中通过通用环境变量适配不同 LLM 提供商：
-
-```
-LLM_PROVIDER=deepseek
-LLM_BASE_URL=https://api.deepseek.com
-LLM_MODEL=deepseek-chat
-LLM_API_KEY=your_key_here
-```
-
-支持的提供商：DeepSeek、OpenAI、Anthropic（需实现对应的 LLM Provider 适配层）。
-
-## 安全
-
-- **绝不提交** API Key、`.env`、`user_profile.json`、`episodes.db`、`chroma_episodes/`、`memory_update.log`
-- 只提交 `.env.example` 作为模板
-- Pre-commit hook（`.githooks/pre-commit`）拦截敏感文件
-- `scripts/security_scan.py` 可手动扫描
-- 详见 `docs/security-playbook.md`
+MIT

@@ -1,0 +1,102 @@
+# ============================================================
+# Aud.IO Docker Compose — 三服务工业级容器化部署
+#
+# 网络路由全景图：
+#   Host (localhost:80)
+#     │
+#     └── frontend (Nginx :80)
+#           ├── /api/*        ──proxy──▶  backend (FastAPI :8001)
+#           │                                 │
+#           │                                 └──▶ netease (Node :3000)
+#           │                                       网易云音乐 API
+#           │
+#           ├── /assets/*     ──static──▶  Vite 构建产物 (长期缓存)
+#           └── /*            ──SPA──▶     index.html (Vue Router)
+#
+# 数据持久化（挂载到宿主机）：
+#   ./backend/memory/  →  /app/backend/memory/
+#     ├── episodes.db          SQLite 情节记忆
+#     ├── chroma_episodes/     ChromaDB 向量索引
+#     ├── user_profile.json    用户画像
+#     └── memory_update.log    画像审计日志
+# ============================================================
+
+services:
+  # ============================================================
+  # 后端 — FastAPI + ChromaDB + SQLite
+  # ============================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: audio/backend:latest
+    container_name: audio-backend
+    restart: unless-stopped
+
+    # 环境变量：从本地 .env 注入容器
+    env_file:
+      - ./backend/.env
+    # 显式覆盖 Docker 内部通信所需的地址（不污染 .env）
+    environment:
+      - NETEASE_API_BASE_URL=http://netease:3000
+
+    volumes:
+      # 记忆数据持久化 —— 整个 memory 目录挂载到宿主机
+      # 容器内路径 /app/backend/memory/ 与 Python 包的 Path(__file__).resolve().parents[1] 对齐
+      - ./backend/memory:/app/backend/memory
+      # .env 只读挂载 —— 供 load_dotenv 查找（main.py 同级），同时 env_file 保证变量已注入
+      - ./backend/.env:/app/backend/.env:ro
+
+    networks:
+      - audio-net
+
+    # 不直接暴露端口到宿主机 —— 所有流量经 Nginx 反向代理
+    # 如需调试可临时取消注释：ports: ["8001:8001"]
+
+    depends_on:
+      netease:
+        condition: service_started
+
+  # ============================================================
+  # 前端 — 多阶段构建 (Node 构建 + Nginx 托管)
+  # ============================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: audio/frontend:latest
+    container_name: audio-frontend
+    restart: unless-stopped
+
+    ports:
+      # 宿主机 80 → 容器 80（可改为其他端口如 5173:80）
+      - "80:80"
+
+    networks:
+      - audio-net
+
+    depends_on:
+      - backend
+
+  # ============================================================
+  # 网易云音乐 API — 第三方非官方镜像
+  # GitHub: https://github.com/Binaryify/NeteaseCloudMusicApi
+  # ============================================================
+  netease:
+    image: binaryify/netease_cloud_music_api:latest
+    container_name: audio-netease
+    restart: unless-stopped
+
+    # 不暴露到宿主机 —— 仅 backend 通过内部网络访问
+    # 如需测试：ports: ["3000:3000"]
+
+    networks:
+      - audio-net
+
+# ============================================================
+# 内部网络
+# ============================================================
+networks:
+  audio-net:
+    driver: bridge
+    name: audio-net

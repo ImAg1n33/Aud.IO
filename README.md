@@ -13,6 +13,7 @@
   <img src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/ChromaDB-Vector_Memory-FF6F00?style=flat-square&logo=database&logoColor=white" alt="ChromaDB">
+  <img src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square" alt="PRs Welcome">
   <img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License">
 </p>
@@ -67,33 +68,50 @@
 
 ---
 
-## 🚀 5 分钟跑起来
+## 🚀 一分钟跑起来
 
 ### 前置条件
 
-- Python 3.11+（推荐 Conda 环境）
-- Node.js 18+
-- [可选] 本地运行的 [NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) 实例（音乐播放需要）
+- [Docker](https://docs.docker.com/get-started/) 已安装并运行
+- DeepSeek API Key（[申请地址](https://platform.deepseek.com/)）
 
-### 安装 & 启动
+### 一键部署（Docker Compose）
 
 ```bash
-# 1. 克隆仓库
 git clone https://github.com/ImAg1n33/Aud.IO.git
 cd Aud.IO
 
-# 2. 后端
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r backend/requirements.txt
-cp backend/.env.example backend/.env                  # 编辑填入 LLM_API_KEY
+# 配置 API Key
+cp backend/.env.example backend/.env
+# 编辑 backend/.env 填入 LLM_API_KEY（必填）和 NETEASE_COOKIE（音乐播放需要）
 
+# 一键启动（后端 + 前端 + 网易云音乐 API）
+docker compose up -d
+
+# 打开浏览器 → http://localhost
+```
+
+三服务自动编排：
+- **前端** Nginx（:80）— SPA 静态托管 + `/api` 反向代理
+- **后端** FastAPI（:8001）— 仅内网，通过 Nginx 代理访问
+- **网易云 API** — 内网，供后端调用
+
+### 本地开发（不依赖 Docker）
+
+```bash
+# 后端
+python -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt
+cp backend/.env.example backend/.env
 uvicorn backend.main:app --reload --port 8001
 
-# 3. 前端（新终端）
+# 前端（新终端）
 cd frontend && npm install && npm run dev
 
-# 4. 打开 http://localhost:5173
+# 打开 http://localhost:5173（Vite dev server 自带 /api 代理）
 ```
+
+> 本地开发需 Node.js 20+ 和 Python 3.11+，并自行启动 NeteaseCloudMusicApi 实例。
 
 ---
 
@@ -102,6 +120,7 @@ cd frontend && npm install && npm run dev
 ```
 Aud.IO/
 ├── backend/
+│   ├── Dockerfile                        # Python 3.11-slim 容器镜像
 │   ├── main.py                          # 应用入口
 │   ├── api/routes_agent.py              # API 路由层
 │   ├── services/assistant_service.py    # ★ 核心编排管道
@@ -121,10 +140,13 @@ Aud.IO/
 │       ├── netease_api.py              #   网易云 API 封装
 │       └── login_netease.py            #   扫码登录
 ├── frontend/
-│   ├── vite.config.js                   # Vite 配置 + API 代理
+│   ├── Dockerfile                        # 多阶段构建（Node 构建 + Nginx 托管）
+│   ├── nginx.conf                        # Nginx 配置（SPA + /api 反代 + SSE 支持）
+│   ├── vite.config.js                   # Vite 配置 + 开发代理
 │   └── src/
 │       ├── App.vue                      # ★ 完整 UI：打字机 + 音频播放器
 │       └── style.css                    # Nothing Design 暗/亮双模式
+├── docker-compose.yml                    # 三服务编排（backend + frontend + netease）
 ├── tests/                               # pytest 测试套件
 ├── docs/                                # 架构文档 & API 文档
 └── .github/workflows/ci.yml             # CI 自动测试 + 安全扫描
@@ -151,7 +173,7 @@ Aud.IO/
 - [x] ChromaDB 向量语义记忆 + 自动心情检测
 - [ ] 天气感知推荐（代码已预留接口）
 - [ ] TTS 语音合成播报（代码已预留接口）
-- [ ] Docker 一键部署
+- [x] Docker 一键部署
 - [ ] 多用户会话隔离
 - [ ] 网页端管理后台
 

@@ -92,6 +92,7 @@ async def test_async_update_profile_uses_deepseek_reasoner_model(tmp_path, monke
             ]
         }
     )
+    monkeypatch.setattr(memory_manager_module, "SLOW_CRITIC_MODEL", "deepseek-v4-pro")
     monkeypatch.setattr(memory_manager_module, "request_json_object", mocked_request)
 
     manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
@@ -99,7 +100,7 @@ async def test_async_update_profile_uses_deepseek_reasoner_model(tmp_path, monke
 
     mocked_request.assert_called_once()
     _, kwargs = mocked_request.call_args
-    assert kwargs["model"] == "deepseek-reasoner"
+    assert kwargs["model"] == "deepseek-v4-pro"
     assert kwargs["temperature"] == 0.1
     assert isinstance(kwargs["messages"], list)
     assert "jazz" in updated["core_taste"]

@@ -20,7 +20,7 @@ from backend.memory.profile_schema import (
 
 
 logger = logging.getLogger(__name__)
-SLOW_CRITIC_MODEL = os.getenv("MEMORY_MODEL", "deepseek-reasoner")
+SLOW_CRITIC_MODEL = os.getenv("MEMORY_MODEL", "").strip()
 
 
 class MemoryManager:

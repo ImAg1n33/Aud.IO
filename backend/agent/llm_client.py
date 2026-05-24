@@ -10,7 +10,7 @@ import httpx
 
 def _get_llm_config(model_override: str | None = None) -> dict[str, str]:
     provider = os.getenv("LLM_PROVIDER", "deepseek").strip().lower()
-    configured_model = os.getenv("LLM_MODEL", "").strip() or "deepseek-chat"
+    configured_model = os.getenv("LLM_MODEL", "").strip()
     model = model_override.strip() if isinstance(model_override, str) and model_override.strip() else configured_model
     base_url = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
 

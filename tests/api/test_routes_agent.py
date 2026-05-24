@@ -18,7 +18,7 @@ async def test_agent_respond_route_returns_json(monkeypatch) -> None:
                 "actions": [],
                 "play_keyword": "",
                 "provider": "deepseek",
-                "model": "deepseek-chat",
+                "model": "mock-model",
             },
             "fake-prompt",
         )

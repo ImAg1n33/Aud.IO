@@ -12,16 +12,23 @@ from backend.tools.base import (
     WeatherError,
     tool_registry,
 )
+from backend.tools.mcp_adapter import (
+    MCPClientManager,
+    MCPToolAdapter,
+    register_mcp_tools,
+)
+from backend.tools.netease_api import (
+    CookieExpiredError,
+    NetEaseError,
+    get_song_mp3_url,
+    search_first_song,
+    search_song,
+)
 
 # Import tool modules to trigger registry auto-registration
 import backend.tools.music_tool  # noqa: E402, F401 — registers SearchMusicTool, GetMusicUrlTool
-import backend.tools.tts        # noqa: E402, F401 — registers TTSTool
-import backend.tools.weather    # noqa: E402, F401 — registers WeatherTool
 
-# Backward-compatible exports (existing code depends on these)
-from backend.tools.netease_api import CookieExpiredError, NetEaseError, get_song_mp3_url, search_first_song, search_song  # noqa: E402
-from backend.tools.tts import synthesize_speech  # noqa: E402
-from backend.tools.weather import get_weather  # noqa: E402
+# MCP adapters are registered at app startup via main.py → register_mcp_tools()
 
 __all__ = [
     # Tool protocol
@@ -38,10 +45,14 @@ __all__ = [
     "MusicCopyrightError",
     "WeatherError",
     "TTSError",
-    # Legacy functions (backward compatible)
+    # MCP layer
+    "MCPToolAdapter",
+    "MCPClientManager",
+    "register_mcp_tools",
+    # NetEase
+    "CookieExpiredError",
+    "NetEaseError",
     "search_song",
     "search_first_song",
     "get_song_mp3_url",
-    "get_weather",
-    "synthesize_speech",
 ]

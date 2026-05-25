@@ -1,40 +1,114 @@
 import { defineStore } from 'pinia'
 
+// Non-reactive internals — Web Audio API objects don't benefit from Vue reactivity
+let audioCtx = null
+let fadeGain = null
+let fadeTimer = null
+let audioElement = null
+
 export const usePlayerStore = defineStore('player', {
   state: () => ({
-    playlist: [],        // 播放队列
-    currentIndex: -1,    // 当前播放的索引
-    isPlaying: false,    // 播放状态
-    playMode: 'dj',      // 模式：'list' (顺序), 'random' (随机), 'loop' (单曲), 'dj' (AI 模式)
-    historyLimit: 10,    // 历史黑名单长度
+    isPlaying: false,
+    playMode: 'dj',           // 'dj' | 'loop' | 'list'
+    currentTrack: /** @type {{name:string, artist:string, mp3_url:string}|null} */ (null),
+    trackDisplay: '///',
   }),
-  
+
   getters: {
-    currentTrack: (state) => state.playlist[state.currentIndex] || null,
-    // 获取最近播放的歌曲名列表，作为发送给大模型的“黑名单”
-    recentSongs: (state) => state.playlist.slice(-5).map(s => `${state.artist} - ${s.name}`)
+    hasTrack: (state) => state.currentTrack !== null,
   },
 
   actions: {
-    // 当 AI 推荐了一首歌，我们把它塞进队列
-    addToQueue(track) {
-      this.playlist.push(track)
-      if (!this.isPlaying) {
-        this.playNext() // 如果当前没在播，直接开播
+    // ── AudioContext lifecycle ──
+
+    /** Bind the <audio> element and initialise Web Audio graph. */
+    attachAudio(el) {
+      audioElement = el
+      if (!audioCtx && audioElement) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+        const source = audioCtx.createMediaElementSource(audioElement)
+        const gain = audioCtx.createGain()
+        source.connect(gain)
+        gain.connect(audioCtx.destination)
+        fadeGain = gain
       }
     },
-    playNext() {
-      if (this.playMode === 'loop') {
-        // 单曲循环逻辑
-      } else if (this.playMode === 'random') {
-        this.currentIndex = Math.floor(Math.random() * this.playlist.length)
-      } else {
-        this.currentIndex++
-      }
+
+    // ── Fade helpers ──
+
+    _fadeOut(duration = 1.5) {
+      if (!fadeGain) return
+      if (fadeTimer) clearTimeout(fadeTimer)
+      fadeGain.gain.setValueAtTime(fadeGain.gain.value, audioCtx.currentTime)
+      fadeGain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration)
+    },
+
+    _fadeIn(duration = 0.8) {
+      if (!fadeGain) return
+      if (fadeTimer) clearTimeout(fadeTimer)
+      fadeGain.gain.setValueAtTime(0, audioCtx.currentTime)
+      fadeGain.gain.linearRampToValueAtTime(1, audioCtx.currentTime + duration)
+    },
+
+    // ── Playback controls ──
+
+    /** Start playing a new track. Called from chat store on SSE "music" event. */
+    playTrack(track) {
+      if (!track?.mp3_url || !audioElement) return
+      this.attachAudio(audioElement) // ensure AudioContext is ready
+      audioElement.src = track.mp3_url
+      audioElement.play()
+      this._fadeIn(0.6)
       this.isPlaying = true
+      this.currentTrack = track
+      this.trackDisplay = `♪ ${track.name} - ${track.artist} ♪`
     },
+
+    stopTrack() {
+      if (!audioElement) return
+      this._fadeOut(1.2)
+      fadeTimer = setTimeout(() => {
+        audioElement.pause()
+        audioElement.currentTime = 0
+        this.isPlaying = false
+      }, 1300)
+    },
+
     togglePlay() {
-      this.isPlaying = !this.isPlaying
-    }
-  }
+      if (!audioElement) return
+      this.attachAudio(audioElement)
+      if (this.isPlaying) {
+        this._fadeOut(0.5)
+        fadeTimer = setTimeout(() => {
+          audioElement.pause()
+          this.isPlaying = false
+        }, 600)
+      } else {
+        audioElement.play()
+        this._fadeIn(0.3)
+        this.isPlaying = true
+      }
+    },
+
+    toggleMode() {
+      const modes = ['dj', 'loop', 'list']
+      const idx = modes.indexOf(this.playMode)
+      this.playMode = modes[(idx + 1) % modes.length]
+    },
+
+    prevTrack() {
+      console.log('Previous track — pending')
+    },
+
+    nextTrack() {
+      console.log('Next track — pending')
+    },
+
+    onEnded() {
+      this.isPlaying = false
+      if (this.playMode === 'dj') {
+        console.log('DJ mode: song ended, ready for next AI pick')
+      }
+    },
+  },
 })

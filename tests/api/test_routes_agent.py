@@ -9,8 +9,8 @@ from backend.main import app
 async def test_agent_respond_route_returns_json(monkeypatch) -> None:
     captured: dict = {}
 
-    async def fake_generate_reply(user_input: str, context: dict | None):
-        captured["generated"] = (user_input, context)
+    async def fake_generate_reply(user_input: str, context: dict | None, session_id: str | None = None):
+        captured["generated"] = (user_input, context, session_id)
         return (
             {
                 "analysis": "ok",
@@ -23,8 +23,8 @@ async def test_agent_respond_route_returns_json(monkeypatch) -> None:
             "fake-prompt",
         )
 
-    def fake_schedule_update(background_tasks, user_input: str, final_reply: dict):
-        captured["scheduled"] = (user_input, final_reply)
+    def fake_schedule_update(background_tasks, user_input: str, final_reply: dict, session_id: str | None = None):
+        captured["scheduled"] = (user_input, final_reply, session_id)
 
     monkeypatch.setattr(routes_agent.assistant_service, "generate_reply", fake_generate_reply)
     monkeypatch.setattr(routes_agent.assistant_service, "schedule_profile_update", fake_schedule_update)
@@ -32,7 +32,7 @@ async def test_agent_respond_route_returns_json(monkeypatch) -> None:
     client = TestClient(app)
     response = client.post(
         "/v1/agent/respond",
-        json={"user_input": "hello", "context": {"scene": "test"}},
+        json={"user_input": "hello", "context": {"scene": "test"}, "session_id": "s1"},
     )
 
     assert response.status_code == 200
@@ -40,4 +40,5 @@ async def test_agent_respond_route_returns_json(monkeypatch) -> None:
     assert payload["reply"]["answer"] == "done"
     assert payload["prompt"] == "fake-prompt"
     assert captured["generated"][0] == "hello"
+    assert captured["generated"][2] == "s1"
     assert captured["scheduled"][0] == "hello"

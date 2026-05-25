@@ -28,11 +28,18 @@ class MemoryManager:
         self,
         profile_path: Path | None = None,
         env_path: Path | None = None,
+        session_id: str = "default",
     ) -> None:
         backend_root = Path(__file__).resolve().parents[1]
-        self.profile_path = profile_path or (backend_root / "memory" / "user_profile.json")
+        if profile_path:
+            self.profile_path = profile_path
+        elif session_id and session_id != "default":
+            self.profile_path = backend_root / "memory" / f"user_profile_{session_id}.json"
+        else:
+            self.profile_path = backend_root / "memory" / "user_profile.json"
         self.env_path = env_path or (backend_root / ".env")
         self.audit_log_path = backend_root / "memory" / "memory_update.log"
+        self.session_id = session_id
         load_dotenv(self.env_path)
 
     def get_profile(self) -> dict[str, Any]:

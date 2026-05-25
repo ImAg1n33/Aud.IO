@@ -23,6 +23,13 @@ const toggleTheme = () => {
   document.documentElement.setAttribute('data-theme', theme.value)
   localStorage.setItem('theme', theme.value)
 }
+// Session identity — persisted UUID for multi-user isolation
+let sessionId = localStorage.getItem('aud_io_session')
+if (!sessionId) {
+  sessionId = crypto.randomUUID()
+  localStorage.setItem('aud_io_session', sessionId)
+}
+
 onMounted(() => {
   const saved = localStorage.getItem('theme')
   if (saved) {
@@ -134,7 +141,8 @@ const sendCommand = async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         user_input: text,
-        context: { "Currently Playing": currentPlayingTrack }
+        context: { "Currently Playing": currentPlayingTrack },
+        session_id: sessionId,
       })
     })
 

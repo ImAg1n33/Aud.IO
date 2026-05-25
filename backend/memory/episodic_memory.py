@@ -91,6 +91,7 @@ class _Meta:
     WEATHER_TAG = "weather_tag"
     TIME_OF_DAY = "time_of_day"
     GENRE_TAG = "genre_tag"
+    SESSION_ID = "session_id"
     # 用于 ChromaDB metadata 过滤的最大字符长度（避免元数据过大）
     MAX_TEXT_LEN = 500
 
@@ -299,6 +300,20 @@ class EpisodicMemory:
                 ON episodes(mood_tag, weather_tag, time_of_day)
             """)
             conn.commit()
+        # v0.3 migration: add session_id column for multi-user isolation
+        self._migrate_sqlite_session_id()
+
+    def _migrate_sqlite_session_id(self) -> None:
+        """Add session_id column if it doesn't exist (v0.3 multi-user isolation)."""
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.execute(
+                    "ALTER TABLE episodes ADD COLUMN session_id TEXT NOT NULL DEFAULT 'default'"
+                )
+                conn.commit()
+            logger.info("SQLite migration: added session_id column to episodes")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
     def _init_chroma(self) -> None:
         """初始化 ChromaDB PersistentClient 及 episodes collection。
@@ -333,6 +348,32 @@ class EpisodicMemory:
             self._collection.count(),
         )
 
+        # v0.3 migration: backfill session_id for existing entries
+        self._migrate_chroma_session_id()
+
+    def _migrate_chroma_session_id(self) -> None:
+        """Backfill existing ChromaDB entries without session_id."""
+        try:
+            results = self._collection.get(include=["metadatas"])
+            if not results["ids"]:
+                return
+            ids_to_update: list[str] = []
+            metadatas_to_update: list[dict[str, str]] = []
+            for i, cid in enumerate(results["ids"]):
+                meta = results["metadatas"][i] if i < len(results["metadatas"]) else {}
+                if _Meta.SESSION_ID not in meta or not meta[_Meta.SESSION_ID]:
+                    meta[_Meta.SESSION_ID] = "default"
+                    ids_to_update.append(cid)
+                    metadatas_to_update.append(meta)
+            if ids_to_update:
+                self._collection.update(ids=ids_to_update, metadatas=metadatas_to_update)
+                logger.info(
+                    "ChromaDB migration: backfilled session_id for %d entries",
+                    len(ids_to_update),
+                )
+        except Exception as exc:
+            logger.warning("ChromaDB session_id migration skipped: %s", exc)
+
     # ================================================================
     # 写入路径 —— Phase 1 双写（ChromaDB + SQLite）
     # ================================================================
@@ -345,6 +386,7 @@ class EpisodicMemory:
         mood_tag: str | None = None,
         weather_tag: str | None = None,
         genre_tag: str | None = None,
+        session_id: str = "default",
     ) -> int:
         """持久化一次对话交互快照（双写 ChromaDB + SQLite）。
 
@@ -355,6 +397,7 @@ class EpisodicMemory:
             mood_tag: 心情标签（None = 自动检测）
             weather_tag: 天气标签（预留）
             genre_tag: 歌曲流派标签
+            session_id: 会话标识符（用于多用户隔离）
 
         Returns:
             新插入记录的 ID（与 SQLite episodes.id 一致）
@@ -391,6 +434,7 @@ class EpisodicMemory:
             weather_tag,
             time_of_day,
             genre_tag,
+            session_id,
         )
 
         # --- 2) ChromaDB 写入（携带向量嵌入） ---
@@ -405,6 +449,7 @@ class EpisodicMemory:
             weather_tag=weather_tag,
             time_of_day=time_of_day,
             genre_tag=genre_tag,
+            session_id=session_id,
         )
 
         if mood_tag:
@@ -431,14 +476,15 @@ class EpisodicMemory:
         weather_tag: str | None,
         time_of_day: str,
         genre_tag: str | None,
+        session_id: str = "default",
     ) -> int:
         """同步 SQLite 插入，返回自增 ID。"""
         with sqlite3.connect(str(self.db_path)) as conn:
             cursor = conn.execute(
                 """INSERT INTO episodes
                    (timestamp, user_input, assistant_reply, played_song_name, played_song_artist,
-                    mood_tag, weather_tag, time_of_day, genre_tag)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    mood_tag, weather_tag, time_of_day, genre_tag, session_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     timestamp,
                     user_input,
@@ -449,6 +495,7 @@ class EpisodicMemory:
                     weather_tag,
                     time_of_day,
                     genre_tag,
+                    session_id,
                 ),
             )
             conn.commit()
@@ -466,6 +513,7 @@ class EpisodicMemory:
         weather_tag: str | None,
         time_of_day: str,
         genre_tag: str | None,
+        session_id: str = "default",
     ) -> None:
         """向 ChromaDB collection 写入或更新一条记录（携带向量）。"""
         try:
@@ -486,6 +534,7 @@ class EpisodicMemory:
             _Meta.WEATHER_TAG: weather_tag or "",
             _Meta.TIME_OF_DAY: time_of_day,
             _Meta.GENRE_TAG: genre_tag or "",
+            _Meta.SESSION_ID: session_id,
         }
 
         try:
@@ -511,6 +560,7 @@ class EpisodicMemory:
         mood_tag: str | None = None,
         time_of_day: str | None = None,
         genre_tag: str | None = None,
+        session_id: str | None = None,
         limit: int = 5,
     ) -> list[EpisodicSnapshot]:
         """基于语义相似度的向量检索 —— 替代旧版关键词 mood 映射。
@@ -536,6 +586,7 @@ class EpisodicMemory:
             mood_tag: 可选的心情标签精确过滤
             time_of_day: 可选的时段精确过滤
             genre_tag: 可选的流派精确过滤
+            session_id: 可选的会话标识符（None = 不过滤）
             limit: 返回记录数上限
 
         Returns:
@@ -547,6 +598,7 @@ class EpisodicMemory:
             mood_tag=mood_tag,
             time_of_day=time_of_day,
             genre_tag=genre_tag,
+            session_id=session_id,
         )
 
         # --- 计算查询文本的向量嵌入 ---
@@ -554,7 +606,7 @@ class EpisodicMemory:
             query_embeddings = await self._embed.embed([query_text])
         except Exception as exc:
             logger.error("查询向量嵌入失败，fallback 到 SQLite 关键词检索: %s", exc)
-            return await self._fallback_keyword_query(query_text, limit)
+            return await self._fallback_keyword_query(query_text, limit, session_id)
 
         # --- ChromaDB 向量检索 ---
         try:
@@ -566,7 +618,7 @@ class EpisodicMemory:
             )
         except Exception as exc:
             logger.error("ChromaDB 查询失败，fallback 到 SQLite: %s", exc)
-            return await self._fallback_keyword_query(query_text, limit)
+            return await self._fallback_keyword_query(query_text, limit, session_id)
 
         # --- 将 ChromaDB 结果映射为 EpisodicSnapshot 列表 ---
         return self._chroma_results_to_snapshots(results)
@@ -582,16 +634,17 @@ class EpisodicMemory:
         weather_tag: str | None = None,
         time_of_day: str | None = None,
         genre_tag: str | None = None,
+        session_id: str | None = None,
         limit: int = 5,
     ) -> list[EpisodicSnapshot]:
         """按标签精确过滤查询 —— Phase 1 优先走 ChromaDB metadata 过滤。
 
         与旧版完全相同的签名和行为：
         - 如果没有任何过滤条件 → 返回最近记录
-        - 支持 mood_tag / weather_tag / time_of_day / genre_tag 的 AND 组合
+        - 支持 mood_tag / weather_tag / time_of_day / genre_tag / session_id 的 AND 组合
         """
-        if not any([mood_tag, weather_tag, time_of_day, genre_tag]):
-            return await self.query_recent(limit=limit)
+        if not any([mood_tag, weather_tag, time_of_day, genre_tag, session_id]):
+            return await self.query_recent(limit=limit, session_id=session_id)
 
         # --- 构建 ChromaDB where 过滤 ---
         where_filter = self._build_chroma_where(
@@ -599,6 +652,7 @@ class EpisodicMemory:
             weather_tag=weather_tag,
             time_of_day=time_of_day,
             genre_tag=genre_tag,
+            session_id=session_id,
         )
 
         try:
@@ -611,7 +665,7 @@ class EpisodicMemory:
         except Exception as exc:
             logger.error("ChromaDB 标签查询失败，fallback 到 SQLite: %s", exc)
             return await self._fallback_tags_query(
-                mood_tag, weather_tag, time_of_day, genre_tag, limit,
+                mood_tag, weather_tag, time_of_day, genre_tag, limit, session_id,
             )
 
         if not results["ids"]:
@@ -630,19 +684,26 @@ class EpisodicMemory:
     # 读取路径 —— 保留的旧版查询方法
     # ================================================================
 
-    async def query_recent(self, limit: int = 10) -> list[EpisodicSnapshot]:
+    async def query_recent(self, limit: int = 10, session_id: str | None = None) -> list[EpisodicSnapshot]:
         """获取最近 N 条记录（SQLite 查询，简单可靠）。"""
         def _query() -> list[EpisodicSnapshot]:
             with sqlite3.connect(str(self.db_path)) as conn:
-                rows = conn.execute(
-                    "SELECT * FROM episodes ORDER BY timestamp DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+                if session_id:
+                    rows = conn.execute(
+                        "SELECT * FROM episodes WHERE session_id = ? "
+                        "ORDER BY timestamp DESC LIMIT ?",
+                        (session_id, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM episodes ORDER BY timestamp DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
                 return [_row_to_snapshot(row) for row in rows]
 
         return await asyncio.to_thread(_query)
 
-    async def query_by_keyword(self, keyword: str, limit: int = 5) -> list[EpisodicSnapshot]:
+    async def query_by_keyword(self, keyword: str, limit: int = 5, session_id: str | None = None) -> list[EpisodicSnapshot]:
         """文本关键词 LIKE 搜索 —— 在 user_input 和 assistant_reply 中匹配。
 
         注意：这是传统的 SQL LIKE 搜索，不是语义搜索。
@@ -652,12 +713,21 @@ class EpisodicMemory:
 
         def _query() -> list[EpisodicSnapshot]:
             with sqlite3.connect(str(self.db_path)) as conn:
-                rows = conn.execute(
-                    """SELECT * FROM episodes
-                       WHERE user_input LIKE ? OR assistant_reply LIKE ?
-                       ORDER BY timestamp DESC LIMIT ?""",
-                    (pattern, pattern, limit),
-                ).fetchall()
+                if session_id:
+                    rows = conn.execute(
+                        """SELECT * FROM episodes
+                           WHERE (user_input LIKE ? OR assistant_reply LIKE ?)
+                           AND session_id = ?
+                           ORDER BY timestamp DESC LIMIT ?""",
+                        (pattern, pattern, session_id, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT * FROM episodes
+                           WHERE user_input LIKE ? OR assistant_reply LIKE ?
+                           ORDER BY timestamp DESC LIMIT ?""",
+                        (pattern, pattern, limit),
+                    ).fetchall()
                 return [_row_to_snapshot(row) for row in rows]
 
         return await asyncio.to_thread(_query)
@@ -666,7 +736,7 @@ class EpisodicMemory:
     # 统计查询 —— 保留 SQLite（SQL 聚合更高效）
     # ================================================================
 
-    async def get_preference_stats(self) -> dict[str, Any]:
+    async def get_preference_stats(self, session_id: str | None = None) -> dict[str, Any]:
         """基于情节记忆的 SQL 聚合统计 —— 生成数据驱动的用户偏好报表。
 
         统计维度:
@@ -680,31 +750,37 @@ class EpisodicMemory:
         - 现在 mood_tag 已被自动检测并写入，mood_genre_correlations 不再总是空
         - 此方法保留 SQLite 实现，因为 SQL GROUP BY 比 ChromaDB 的元数据聚合更高效
         """
+        # Build WHERE fragment: "WHERE session_id = ?" or empty
+        where_prefix = "WHERE session_id = ? AND " if session_id else "WHERE "
+        params: tuple = (session_id,) if session_id else ()
 
         def _compute() -> dict[str, Any]:
             with sqlite3.connect(str(self.db_path)) as conn:
                 # 流派排行
                 genre_rows = conn.execute(
-                    """SELECT genre_tag, COUNT(*) as cnt FROM episodes
-                       WHERE genre_tag IS NOT NULL AND genre_tag != ''
-                       GROUP BY genre_tag ORDER BY cnt DESC LIMIT 8"""
+                    f"""SELECT genre_tag, COUNT(*) as cnt FROM episodes
+                       {where_prefix}genre_tag IS NOT NULL AND genre_tag != ''
+                       GROUP BY genre_tag ORDER BY cnt DESC LIMIT 8""",
+                    params,
                 ).fetchall()
                 top_genres = [{"genre": row[0], "count": row[1]} for row in genre_rows]
 
                 # 艺人排行
                 artist_rows = conn.execute(
-                    """SELECT played_song_artist, COUNT(*) as cnt FROM episodes
-                       WHERE played_song_artist IS NOT NULL AND played_song_artist != ''
-                       GROUP BY played_song_artist ORDER BY cnt DESC LIMIT 8"""
+                    f"""SELECT played_song_artist, COUNT(*) as cnt FROM episodes
+                       {where_prefix}played_song_artist IS NOT NULL AND played_song_artist != ''
+                       GROUP BY played_song_artist ORDER BY cnt DESC LIMIT 8""",
+                    params,
                 ).fetchall()
                 top_artists = [{"artist": row[0], "count": row[1]} for row in artist_rows]
 
                 # 心情-流派相关性（现在 mood_tag 会被自动填充，不再总是空）
                 mood_genre_rows = conn.execute(
-                    """SELECT mood_tag, genre_tag, COUNT(*) as cnt FROM episodes
-                       WHERE mood_tag IS NOT NULL AND mood_tag != ''
+                    f"""SELECT mood_tag, genre_tag, COUNT(*) as cnt FROM episodes
+                       {where_prefix}mood_tag IS NOT NULL AND mood_tag != ''
                          AND genre_tag IS NOT NULL AND genre_tag != ''
-                       GROUP BY mood_tag, genre_tag ORDER BY cnt DESC LIMIT 12"""
+                       GROUP BY mood_tag, genre_tag ORDER BY cnt DESC LIMIT 12""",
+                    params,
                 ).fetchall()
                 mood_genre = [
                     {"mood": row[0], "genre": row[1], "count": row[2]}
@@ -713,9 +789,10 @@ class EpisodicMemory:
 
                 # 时段-流派模式
                 time_rows = conn.execute(
-                    """SELECT time_of_day, genre_tag, COUNT(*) as cnt FROM episodes
-                       WHERE genre_tag IS NOT NULL AND genre_tag != ''
-                       GROUP BY time_of_day, genre_tag ORDER BY cnt DESC LIMIT 12"""
+                    f"""SELECT time_of_day, genre_tag, COUNT(*) as cnt FROM episodes
+                       {where_prefix}genre_tag IS NOT NULL AND genre_tag != ''
+                       GROUP BY time_of_day, genre_tag ORDER BY cnt DESC LIMIT 12""",
+                    params,
                 ).fetchall()
                 time_patterns = [
                     {"time": row[0], "genre": row[1], "count": row[2]}
@@ -723,7 +800,12 @@ class EpisodicMemory:
                 ]
 
                 # 总量
-                total_row = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()
+                total_sql = (
+                    "SELECT COUNT(*) FROM episodes WHERE session_id = ?"
+                    if session_id
+                    else "SELECT COUNT(*) FROM episodes"
+                )
+                total_row = conn.execute(total_sql, params).fetchone()
                 total = total_row[0] if total_row else 0
 
             return {
@@ -785,6 +867,7 @@ class EpisodicMemory:
         weather_tag: str | None = None,
         time_of_day: str | None = None,
         genre_tag: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any] | None:
         """将标签过滤参数转换为 ChromaDB metadata where 过滤条件。
 
@@ -803,6 +886,8 @@ class EpisodicMemory:
             conditions.append({_Meta.TIME_OF_DAY: time_of_day.strip()})
         if genre_tag and genre_tag.strip():
             conditions.append({_Meta.GENRE_TAG: genre_tag.strip()})
+        if session_id and session_id.strip():
+            conditions.append({_Meta.SESSION_ID: session_id.strip()})
 
         if not conditions:
             return None
@@ -909,16 +994,16 @@ class EpisodicMemory:
     # ================================================================
 
     async def _fallback_keyword_query(
-        self, query_text: str, limit: int
+        self, query_text: str, limit: int, session_id: str | None = None
     ) -> list[EpisodicSnapshot]:
         """ChromaDB 查询失败时的降级方案 —— SQLite LIKE 搜索。"""
         # 取查询文本中的关键词（简单分词：取前 3 个长度 >= 2 的 token）
         tokens = [t for t in query_text.split() if len(t) >= 2][:3]
         if not tokens:
-            return await self.query_recent(limit=limit)
+            return await self.query_recent(limit=limit, session_id=session_id)
 
         # 用第一个有效 token 做 LIKE 搜索
-        return await self.query_by_keyword(tokens[0], limit=limit)
+        return await self.query_by_keyword(tokens[0], limit=limit, session_id=session_id)
 
     async def _fallback_tags_query(
         self,
@@ -927,6 +1012,7 @@ class EpisodicMemory:
         time_of_day: str | None,
         genre_tag: str | None,
         limit: int,
+        session_id: str | None = None,
     ) -> list[EpisodicSnapshot]:
         """ChromaDB 标签查询失败时的降级方案 —— 回退到 SQLite 精确过滤。
 
@@ -947,6 +1033,9 @@ class EpisodicMemory:
         if genre_tag:
             conditions.append("genre_tag = ?")
             params.append(genre_tag)
+        if session_id:
+            conditions.append("session_id = ?")
+            params.append(session_id)
 
         if not conditions:
             return await self.query_recent(limit=limit)

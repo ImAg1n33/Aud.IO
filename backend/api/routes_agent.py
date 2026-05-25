@@ -15,6 +15,7 @@ assistant_service = AssistantService()
 class AgentRequest(BaseModel):
     user_input: str
     context: dict[str, Any] | None = None
+    session_id: str | None = None
 
 
 class AgentResponse(BaseModel):
@@ -24,8 +25,12 @@ class AgentResponse(BaseModel):
 
 @router.post("/respond", response_model=AgentResponse)
 async def agent_respond(payload: AgentRequest, background_tasks: BackgroundTasks) -> AgentResponse:
-    final_reply, prompt = await assistant_service.generate_reply(payload.user_input, payload.context)
-    assistant_service.schedule_profile_update(background_tasks, payload.user_input, final_reply)
+    final_reply, prompt = await assistant_service.generate_reply(
+        payload.user_input, payload.context, session_id=payload.session_id,
+    )
+    assistant_service.schedule_profile_update(
+        background_tasks, payload.user_input, final_reply, session_id=payload.session_id,
+    )
     return AgentResponse(reply=final_reply, prompt=prompt)
 
 
@@ -41,7 +46,7 @@ async def agent_respond_stream(payload: AgentRequest, background_tasks: Backgrou
     async def generate():
         full_reply: dict[str, Any] = {}
         async for sse_msg in assistant_service.generate_reply_stream(
-            payload.user_input, payload.context
+            payload.user_input, payload.context, session_id=payload.session_id,
         ):
             # Capture the final reply from the done event for profile update
             if sse_msg.startswith("event: done"):
@@ -54,7 +59,8 @@ async def agent_respond_stream(payload: AgentRequest, background_tasks: Backgrou
 
         if full_reply:
             assistant_service.schedule_profile_update(
-                background_tasks, payload.user_input, full_reply
+                background_tasks, payload.user_input, full_reply,
+                session_id=payload.session_id,
             )
 
     return StreamingResponse(

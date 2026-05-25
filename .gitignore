@@ -18,6 +18,7 @@ env/
 
 # Local memory context (never commit personal data — these contain user interaction history)
 backend/memory/user_profile.json
+backend/memory/user_profile_*.json
 backend/memory/episodes.db
 backend/memory/memory_update.log
 backend/memory/chroma_episodes/

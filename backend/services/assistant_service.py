@@ -1,13 +1,15 @@
 """Agent orchestration: Perceive -> Decide -> Execute -> Record pipeline.
 
-v2.0 升级:
-- EpisodicMemory 默认启用 ChromaDB 向量存储（本地 ONNX 模型，无需外网）
-- store_snapshot() 自动检测 mood_tag 并回填，无需调用方手动传参
-- 语义检索路径已在 EpisodicMemoryProvider 中生效
+v0.3 升级:
+- 引入 SessionManager (TTLCache) 实现多用户会话隔离
+- ConversationMemory 和 MemoryManager 按 session_id 独立
+- EpisodicMemory 共享实例，通过 session_id 过滤检索
+- ContextAssembler 每请求重建，携带当前会话的 provider 引用
 """
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -25,42 +27,59 @@ from backend.agent.llm_client import call_llm, stream_llm
 from backend.agent.memory_manager import MemoryManager
 from backend.agent.prompt_builder import ENHANCED_SYSTEM_PERSONA, ENHANCED_TOOL_CONSTRAINTS
 from backend.agent.tool_executor import ToolExecutor
-from backend.memory.conversation_memory import ConversationMemory
 from backend.memory.embedding import EmbeddingProvider
 from backend.memory.episodic_memory import EpisodicMemory
+from backend.services.session_manager import SessionManager
 
 
 class AssistantService:
     MAX_RETRIES = 2
+    SESSION_TTL = 86400   # 24 hours idle → evict
+    MAX_SESSIONS = 100
 
     def __init__(
         self,
-        memory_manager: MemoryManager | None = None,
         episodic_db_path: Path | None = None,
         embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
-        """初始化助理服务。
-
-        Args:
-            memory_manager: 用户画像管理器（None = 使用默认路径）
-            episodic_db_path: 情节记忆 SQLite 数据库路径（None = 默认路径）
-            embedding_provider: 向量嵌入提供者（None = 根据环境变量自动选择）
-        """
         backend_root = Path(__file__).resolve().parents[1]
-        self.memory_manager = memory_manager or MemoryManager()
-        self.short_term_memory = ConversationMemory(max_turns=20)
-        # ChromaDB 双写架构：EpisodicMemory 内部自动管理 SQLite + ChromaDB
+        self.session_manager = SessionManager(ttl=self.SESSION_TTL, maxsize=self.MAX_SESSIONS)
+        # EpisodicMemory is shared across sessions (filtered by session_id at query time)
         self.episodic_memory = EpisodicMemory(
             db_path=episodic_db_path or (backend_root / "memory" / "episodes.db"),
             embedding_provider=embedding_provider,
         )
-        self.episodic_provider = EpisodicMemoryProvider(self.episodic_memory)
         self.intent_classifier = IntentClassifier()
         self.tool_executor = ToolExecutor(max_retries=self.MAX_RETRIES)
-        self.context_assembler = ContextAssembler(
+        # EpisodicMemoryProvider is reusable (references shared episodic_memory)
+        self.episodic_provider = EpisodicMemoryProvider(self.episodic_memory)
+
+    # ================================================================
+    # Session helpers
+    # ================================================================
+
+    def _resolve_session(self, session_id: str | None) -> str:
+        """Normalise session_id — generate UUID if missing."""
+        return session_id.strip() if session_id else str(uuid.uuid4())
+
+    def _ensure_memory_manager(self, session_id: str) -> None:
+        """Lazily initialise MemoryManager for a session if not yet created."""
+        ctx = self.session_manager.get_or_create(session_id)
+        if ctx.memory_manager is None:
+            ctx.memory_manager = MemoryManager(session_id=session_id)
+
+    def _build_context_assembler(
+        self,
+        session_id: str,
+    ) -> ContextAssembler:
+        """Create a ContextAssembler wired to the current session's state."""
+        self._ensure_memory_manager(session_id)
+        ctx = self.session_manager.get_or_create(session_id)
+
+        return ContextAssembler(
             providers=[
-                ConversationHistoryProvider(self.short_term_memory),
-                UserPreferenceProvider(self.memory_manager, self.episodic_memory),
+                ConversationHistoryProvider(ctx.short_term_memory),
+                UserPreferenceProvider(ctx.memory_manager, self.episodic_memory),
                 CurrentlyPlayingProvider(),
                 ToolSchemaProvider(),
                 self.episodic_provider,
@@ -69,23 +88,30 @@ class AssistantService:
             tool_constraints=ENHANCED_TOOL_CONSTRAINTS,
         )
 
-    async def generate_reply(
-        self, user_input: str, context: dict[str, Any] | None
-    ) -> tuple[dict[str, Any], str]:
-        """Perceive -> Decide -> Execute -> Record pipeline.
+    # ================================================================
+    # Non-streaming pipeline
+    # ================================================================
 
-        Returns (reply_dict, prompt_string) — same contract as before.
-        """
+    async def generate_reply(
+        self, user_input: str, context: dict[str, Any] | None,
+        session_id: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Perceive -> Decide -> Execute -> Record pipeline."""
+        sid = self._resolve_session(session_id)
+        ctx = self.session_manager.get_or_create(sid)
+        self._ensure_memory_manager(sid)
+
         # === PERCEIVE ===
         intent = self.intent_classifier.classify(user_input)
         metadata: dict[str, Any] = dict(context or {})
 
-        # Refresh mood keys from latest profile so episodic provider stays current
-        profile = self.memory_manager.get_profile()
+        # Refresh mood keys from per-session profile
+        profile = ctx.memory_manager.get_profile()
         mood_bias = profile.get("mood_bias", {}) if isinstance(profile, dict) else {}
         self.episodic_provider._mood_keys = [k.lower() for k in mood_bias.keys() if k.strip()]
 
-        prompt = await self.context_assembler.assemble(user_input, intent, metadata)
+        assembler = self._build_context_assembler(sid)
+        prompt = await assembler.assemble(user_input, intent, metadata)
 
         # === DECIDE + EXECUTE (with retry loop) ===
         working_input = user_input
@@ -109,54 +135,54 @@ class AssistantService:
             retry_count += 1
             feedback = self._build_retry_feedback(final_reply, retry_contexts)
             working_input = f"{user_input}\n\n[System: {feedback}]"
-            prompt = await self.context_assembler.assemble(working_input, intent, metadata)
+            prompt = await assembler.assemble(working_input, intent, metadata)
 
         # === RECORD ===
-        # Don't record error responses — they pollute conversation history
         if final_reply.get("analysis") != "Model call failed.":
             played_song = final_reply.get("music")
-            self.short_term_memory.add_turn(
+            ctx.short_term_memory.add_turn(
                 user_input,
                 final_reply.get("answer", ""),
                 intent=str(intent),
                 played_song=played_song,
             )
 
-            # Fire-and-forget episodic storage (don't block the response)
             asyncio.ensure_future(
                 self.episodic_memory.store_snapshot(
                     user_input,
                     final_reply.get("answer", ""),
                     played_song=played_song,
+                    session_id=sid,
                 )
             )
 
         return final_reply, prompt
 
-    async def generate_reply_stream(
-        self, user_input: str, context: dict[str, Any] | None
-    ) -> AsyncGenerator[str, None]:
-        """Streaming variant: yields SSE events for real-time typewriter UX.
+    # ================================================================
+    # Streaming pipeline
+    # ================================================================
 
-        Events:
-          event: token  data: "<raw content chunk>"     — streaming activity indicator
-          event: text   data: "<clean answer text>"     — replaces display when ready
-          event: music  data: <JSON music object>       — trigger playback
-          event: done   data: <JSON full reply>         — debug panel
-          event: error  data: "<error message>"
-        """
-        # === PERCEIVE (same as non-streaming) ===
+    async def generate_reply_stream(
+        self, user_input: str, context: dict[str, Any] | None,
+        session_id: str | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Streaming variant: yields SSE events for real-time typewriter UX."""
+        sid = self._resolve_session(session_id)
+        ctx = self.session_manager.get_or_create(sid)
+        self._ensure_memory_manager(sid)
+
+        # === PERCEIVE ===
         intent = self.intent_classifier.classify(user_input)
         metadata: dict[str, Any] = dict(context or {})
 
-        profile = self.memory_manager.get_profile()
+        profile = ctx.memory_manager.get_profile()
         mood_bias = profile.get("mood_bias", {}) if isinstance(profile, dict) else {}
         self.episodic_provider._mood_keys = [k.lower() for k in mood_bias.keys() if k.strip()]
 
-        prompt = await self.context_assembler.assemble(user_input, intent, metadata)
+        assembler = self._build_context_assembler(sid)
+        prompt = await assembler.assemble(user_input, intent, metadata)
 
         # === DECIDE (streaming with retry) ===
-        # stream_llm() 内部已处理连接重试，此处只区分成功/中断两种结果
         reply: dict[str, Any] = {}
         stream_interrupted: bool = False
 
@@ -167,35 +193,30 @@ class AssistantService:
                 reply = chunk
                 if reply.get("analysis") == "Model call failed.":
                     stream_interrupted = reply.get("stream_interrupted", False)
-                    # 场景 B（中途中断）: 前端已渲染部分文本，不发送 text 事件覆盖
-                    # 场景 A（连接失败）: 前端未收到任何 token，直接报错
                     error_msg = reply.get("answer", "Request failed")
                     if stream_interrupted:
-                        # 保留前端已有的打字机文本，仅追加错误提示
                         yield self._sse("error", error_msg)
                     else:
                         yield self._sse("error", error_msg)
                     return
 
         if stream_interrupted or reply.get("analysis") == "Model call failed.":
-            return  # 已在上面处理，防御性返回
+            return
 
-        # Send clean answer text for display replacement
         yield self._sse("text", reply.get("answer", ""))
 
-        # === EXECUTE (tool actions after streaming) ===
+        # === EXECUTE ===
         actions = self._parse_actions_from_reply(reply)
         results = await self.tool_executor.execute_actions(actions)
         final_reply = self._merge_tool_results(reply, results)
 
-        # Send music data
         music = final_reply.get("music")
         if isinstance(music, dict) and music.get("song_id"):
             yield self._sse("music", json.dumps(music, ensure_ascii=False))
 
         # === RECORD ===
         played_song = final_reply.get("music")
-        self.short_term_memory.add_turn(
+        ctx.short_term_memory.add_turn(
             user_input,
             final_reply.get("answer", ""),
             intent=str(intent),
@@ -206,15 +227,14 @@ class AssistantService:
                 user_input,
                 final_reply.get("answer", ""),
                 played_song=played_song,
+                session_id=sid,
             )
         )
 
-        # Done — send full reply for debug panel
         yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
 
     @staticmethod
     def _sse(event: str, data: str) -> str:
-        """Format an SSE message."""
         return f"event: {event}\ndata: {data}\n\n"
 
     def schedule_profile_update(
@@ -222,26 +242,22 @@ class AssistantService:
         background_tasks: Any,
         user_input: str,
         final_reply: dict[str, Any],
+        session_id: str | None = None,
     ) -> None:
-        """Schedule async profile update as a background task. Unchanged from before."""
+        sid = self._resolve_session(session_id)
+        ctx = self.session_manager.get_or_create(sid)
         background_tasks.add_task(
-            self.memory_manager.async_update_profile,
+            ctx.memory_manager.async_update_profile,
             user_input,
             json.dumps(final_reply, ensure_ascii=False),
         )
 
     # ================================================================
-    # Helpers
+    # Helpers (unchanged)
     # ================================================================
 
     @staticmethod
     def _parse_actions_from_reply(reply: dict[str, Any]) -> list[dict[str, Any]]:
-        """Extract tool action directives from LLM response.
-
-        Accepts two formats (LLMs sometimes produce one or the other):
-        1. Proper JSON: {"tool": "search_music", "keyword": "..."}
-        2. String-encoded: "{'tool': 'search_music', 'keyword': '...'}"
-        """
         actions = reply.get("actions", [])
         if not isinstance(actions, list):
             return []
@@ -252,10 +268,8 @@ class AssistantService:
                 tool_actions.append(item)
                 continue
 
-            # Try to parse string-encoded dict (common LLM output bug)
             if isinstance(item, str):
                 stripped = item.strip()
-                # Try JSON first
                 try:
                     parsed = json.loads(stripped)
                     if isinstance(parsed, dict) and "tool" in parsed:
@@ -263,7 +277,6 @@ class AssistantService:
                         continue
                 except json.JSONDecodeError:
                     pass
-                # Try Python dict repr: {'tool': 'search_music', ...}
                 try:
                     import ast
                     parsed = ast.literal_eval(stripped)
@@ -279,11 +292,6 @@ class AssistantService:
     def _merge_tool_results(
         reply: dict[str, Any], results: list[Any]
     ) -> dict[str, Any]:
-        """Attach successful tool results to the reply dict.
-
-        When a search_music result is found without a follow-up get_music_url,
-        automatically resolve the mp3_url via synchronous call.
-        """
         from backend.tools.netease_api import get_song_mp3_url
 
         merged = dict(reply)
@@ -296,14 +304,12 @@ class AssistantService:
                 continue
 
             if "song_id" in result.data and "mp3_url" not in result.data:
-                # search_music result — attach as music data
                 merged["music"] = {
                     "requested_keyword": result.data.get("requested_keyword", ""),
                     "song_id": result.data.get("song_id", ""),
                     "name": result.data.get("name", ""),
                     "artist": result.data.get("artist", ""),
                 }
-                # Auto-resolve MP3 URL
                 sid = result.data.get("song_id", "")
                 if sid:
                     try:
@@ -322,7 +328,6 @@ class AssistantService:
 
     @staticmethod
     def _collect_retry_contexts(results: list[Any]) -> list[str]:
-        """Collect retry feedback messages from tool execution results."""
         contexts: list[str] = []
         for result in results:
             if hasattr(result, "metadata") and result.metadata.get("retry_context"):
@@ -331,7 +336,6 @@ class AssistantService:
 
     @staticmethod
     def _build_retry_feedback(reply: dict[str, Any], retry_contexts: list[str]) -> str:
-        """Build feedback message for the LLM retry loop."""
         music = reply.get("music")
         song_name = ""
         if isinstance(music, dict):
@@ -345,7 +349,6 @@ class AssistantService:
 
     @staticmethod
     def _build_graceful_fallback(reply: dict[str, Any]) -> dict[str, Any]:
-        """Build a gracefully degraded reply after all retries exhausted."""
         degraded = dict(reply)
         degraded.pop("music", None)
         degraded["play_keyword"] = ""

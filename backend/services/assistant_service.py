@@ -118,11 +118,11 @@ class AssistantService:
         retry_count = 0
 
         while True:
-            reply = await asyncio.to_thread(call_llm, prompt)
+            reply = await call_llm(prompt)
 
             actions = self._parse_actions_from_reply(reply)
             results = await self.tool_executor.execute_actions(actions)
-            final_reply = self._merge_tool_results(reply, results)
+            final_reply = await self._merge_tool_results(reply, results)
 
             retry_contexts = self._collect_retry_contexts(results)
             if not retry_contexts:
@@ -208,7 +208,7 @@ class AssistantService:
         # === EXECUTE ===
         actions = self._parse_actions_from_reply(reply)
         results = await self.tool_executor.execute_actions(actions)
-        final_reply = self._merge_tool_results(reply, results)
+        final_reply = await self._merge_tool_results(reply, results)
 
         music = final_reply.get("music")
         if isinstance(music, dict) and music.get("song_id"):
@@ -289,7 +289,7 @@ class AssistantService:
         return tool_actions
 
     @staticmethod
-    def _merge_tool_results(
+    async def _merge_tool_results(
         reply: dict[str, Any], results: list[Any]
     ) -> dict[str, Any]:
         from backend.tools.netease_api import get_song_mp3_url
@@ -313,7 +313,7 @@ class AssistantService:
                 sid = result.data.get("song_id", "")
                 if sid:
                     try:
-                        mp3_url = get_song_mp3_url(str(sid))
+                        mp3_url = await get_song_mp3_url(str(sid))
                         merged["music"]["mp3_url"] = mp3_url
                     except Exception:
                         merged["music"]["mp3_url"] = ""

@@ -1,5 +1,5 @@
 import json
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -8,7 +8,7 @@ from backend.agent.memory_manager import MemoryManager
 
 
 class FakePatchMemoryManager(MemoryManager):
-    def _request_patch_from_model(self, user_input, assistant_reply, old_profile):
+    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile):
         return [
             {"op": "add", "path": "/core_taste/-", "value": "jazz"},
             {"op": "add", "path": "/artist_preference/liked/-", "value": "Miles Davis"},
@@ -16,7 +16,7 @@ class FakePatchMemoryManager(MemoryManager):
 
 
 class FakeNoChangeMemoryManager(MemoryManager):
-    def _request_patch_from_model(self, user_input, assistant_reply, old_profile):
+    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile):
         return []
 
 
@@ -85,7 +85,7 @@ async def test_async_update_profile_uses_deepseek_reasoner_model(tmp_path, monke
         encoding="utf-8",
     )
 
-    mocked_request = Mock(
+    mocked_request = AsyncMock(
         return_value={
             "patch": [
                 {"op": "add", "path": "/core_taste/-", "value": "jazz"},
@@ -118,7 +118,7 @@ async def test_async_update_profile_empty_patch_does_not_overwrite_profile_file(
     original_text = json.dumps(original_profile, ensure_ascii=False, indent=2) + "\n"
     profile_path.write_text(original_text, encoding="utf-8")
 
-    mocked_request = Mock(return_value={})
+    mocked_request = AsyncMock(return_value={})
     monkeypatch.setattr(memory_manager_module, "request_json_object", mocked_request)
 
     manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")

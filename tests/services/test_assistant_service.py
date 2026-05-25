@@ -36,7 +36,7 @@ TEST_SID = "test-session"
 class TestGenerateReply:
     @pytest.mark.asyncio
     async def test_injects_profile_for_music_intent(self, service, monkeypatch) -> None:
-        def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(prompt: str, model: str | None = None):
             assert "lofi" in prompt or "Preferred genres" in prompt
             return {
                 "analysis": "ok",
@@ -59,7 +59,7 @@ class TestGenerateReply:
 
     @pytest.mark.asyncio
     async def test_chitchat_skips_profile(self, service, monkeypatch) -> None:
-        def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(prompt: str, model: str | None = None):
             assert "User Music Profile" not in prompt
             return {
                 "analysis": "ok",
@@ -79,7 +79,7 @@ class TestGenerateReply:
 
     @pytest.mark.asyncio
     async def test_records_short_term_memory(self, service, monkeypatch) -> None:
-        def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(prompt: str, model: str | None = None):
             return {
                 "analysis": "ok",
                 "answer": "test answer",
@@ -102,7 +102,7 @@ class TestGenerateReply:
     async def test_retries_on_tool_error(self, service, monkeypatch) -> None:
         call_count = {"val": 0}
 
-        def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(prompt: str, model: str | None = None):
             call_count["val"] += 1
             return {
                 "analysis": "ok",
@@ -135,7 +135,7 @@ class TestGenerateReply:
 
     @pytest.mark.asyncio
     async def test_graceful_degradation_after_retries(self, service, monkeypatch) -> None:
-        def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(prompt: str, model: str | None = None):
             return {
                 "analysis": "ok",
                 "answer": "playing",
@@ -182,7 +182,7 @@ class TestSessionIsolation:
     @pytest.mark.asyncio
     async def test_conversation_history_isolated(self, service, monkeypatch) -> None:
         """Session A's conversation should not leak into Session B."""
-        def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(prompt: str, model: str | None = None):
             return {
                 "analysis": "ok", "answer": "ok",
                 "actions": [], "play_keyword": "",
@@ -213,7 +213,7 @@ class TestSessionIsolation:
     @pytest.mark.asyncio
     async def test_episodic_memory_filtered_by_session(self, service, monkeypatch) -> None:
         """Episodic snapshots store session_id and queries filter by it."""
-        def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(prompt: str, model: str | None = None):
             return {
                 "analysis": "ok", "answer": "playing",
                 "actions": [], "play_keyword": "",

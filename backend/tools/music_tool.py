@@ -1,6 +1,5 @@
 """NetEase Cloud Music tools implementing the BaseTool protocol."""
 
-import asyncio
 import os
 from typing import Any
 
@@ -12,7 +11,7 @@ from backend.tools.base import (
     ToolResult,
     tool_registry,
 )
-from backend.tools.netease_api import get_song_mp3_url, search_first_song
+from backend.tools.netease_api import CookieExpiredError, get_song_mp3_url, search_first_song
 
 
 class SearchMusicTool(BaseTool):
@@ -44,7 +43,7 @@ class SearchMusicTool(BaseTool):
             )
 
         try:
-            song = await asyncio.to_thread(search_first_song, keyword)
+            song = await search_first_song(keyword)
             return ToolResult.ok(
                 {
                     "song_id": song["id"],
@@ -53,6 +52,11 @@ class SearchMusicTool(BaseTool):
                     "requested_keyword": keyword,
                 },
                 provider="netease",
+            )
+        except CookieExpiredError as exc:
+            return ToolResult.fail(
+                MusicSearchError(str(exc)),
+                data={"requested_keyword": keyword},
             )
         except Exception as exc:
             return ToolResult.fail(
@@ -89,11 +93,16 @@ class GetMusicUrlTool(BaseTool):
             )
 
         try:
-            mp3_url = await asyncio.to_thread(get_song_mp3_url, song_id)
+            mp3_url = await get_song_mp3_url(song_id)
             return ToolResult.ok({"mp3_url": mp3_url, "song_id": song_id}, provider="netease")
         except LookupError as exc:
             return ToolResult.fail(
                 MusicCopyrightError(str(exc)),
+                data={"song_id": song_id},
+            )
+        except CookieExpiredError as exc:
+            return ToolResult.fail(
+                ToolExecutionError(str(exc)),
                 data={"song_id": song_id},
             )
         except Exception as exc:

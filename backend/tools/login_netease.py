@@ -1,10 +1,11 @@
+"""NetEase Cloud Music QR-code login — unified httpx sync backend."""
+
 import base64
 import json
 import time
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
+import httpx
 from dotenv import set_key
 
 
@@ -15,22 +16,19 @@ ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
 
 def _request_json(path: str, params: dict[str, str] | None = None) -> dict:
-    query = urlencode(params or {})
     url = f"{BASE_URL}/{path.lstrip('/')}"
-    if query:
-        url = f"{url}?{query}"
 
-    req = Request(
-        url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "Aud.IO/0.1 (+https://github.com)",
-        },
-        method="GET",
-    )
-
-    with urlopen(req, timeout=20) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    with httpx.Client(timeout=20) as client:
+        response = client.get(
+            url,
+            params=params or {},
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Aud.IO/0.2 (+https://github.com)",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
     if not isinstance(payload, dict):
         raise ValueError("Unexpected JSON payload from NetEase API.")
     return payload

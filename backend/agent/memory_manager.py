@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any
 import os
 
-from dotenv import load_dotenv
-
 from backend.agent.llm_client import request_json_object
 from backend.agent.prompt_builder import build_memory_observer_messages
 from backend.memory.profile_schema import (
@@ -37,10 +35,8 @@ class MemoryManager:
             self.profile_path = backend_root / "memory" / f"user_profile_{session_id}.json"
         else:
             self.profile_path = backend_root / "memory" / "user_profile.json"
-        self.env_path = env_path or (backend_root / ".env")
         self.audit_log_path = backend_root / "memory" / "memory_update.log"
         self.session_id = session_id
-        load_dotenv(self.env_path)
 
     def get_profile(self) -> dict[str, Any]:
         """Synchronously read and validate user_profile.json. Returns dict for backward compat."""
@@ -53,8 +49,7 @@ class MemoryManager:
         Flow: read → model proposes patch → apply → validate with Pydantic → atomic write.
         """
         current_profile = await asyncio.to_thread(self.get_profile)
-        patch_ops = await asyncio.to_thread(
-            self._request_patch_from_model,
+        patch_ops = await self._request_patch_from_model(
             user_input,
             assistant_reply,
             current_profile,
@@ -159,7 +154,7 @@ class MemoryManager:
     # Private: JSON Patch engine (unchanged)
     # ================================================================
 
-    def _request_patch_from_model(
+    async def _request_patch_from_model(
         self,
         user_input: str,
         assistant_reply: str,
@@ -168,7 +163,7 @@ class MemoryManager:
         messages = build_memory_observer_messages(old_profile, user_input, assistant_reply)
 
         try:
-            parsed = request_json_object(messages=messages, model=SLOW_CRITIC_MODEL, temperature=0.1)
+            parsed = await request_json_object(messages=messages, model=SLOW_CRITIC_MODEL, temperature=0.1)
 
             if parsed == {}:
                 self._append_audit_log({"status": "no_change", "model": SLOW_CRITIC_MODEL})

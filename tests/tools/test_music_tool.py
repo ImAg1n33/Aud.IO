@@ -15,7 +15,7 @@ def ensure_music_tools() -> None:
 class TestSearchMusicTool:
     @pytest.mark.asyncio
     async def test_execute_success(self, monkeypatch) -> None:
-        def fake_search(keyword: str):
+        async def fake_search(keyword: str):
             return {"id": "123", "name": "Test Song", "artist": "Test Artist"}
 
         tool = SearchMusicTool()
@@ -31,7 +31,7 @@ class TestSearchMusicTool:
 
     @pytest.mark.asyncio
     async def test_execute_failure(self, monkeypatch) -> None:
-        def fake_search(keyword: str):
+        async def fake_search(keyword: str):
             raise RuntimeError("API down")
 
         tool = SearchMusicTool()
@@ -56,7 +56,7 @@ class TestSearchMusicTool:
 class TestGetMusicUrlTool:
     @pytest.mark.asyncio
     async def test_execute_success(self, monkeypatch) -> None:
-        def fake_get_url(song_id: str, level: str = "standard"):
+        async def fake_get_url(song_id: str, level: str = "standard"):
             return "https://example.com/song.mp3"
 
         tool = GetMusicUrlTool()
@@ -70,7 +70,7 @@ class TestGetMusicUrlTool:
 
     @pytest.mark.asyncio
     async def test_execute_copyright_failure(self, monkeypatch) -> None:
-        def fake_get_url(song_id: str, level: str = "standard"):
+        async def fake_get_url(song_id: str, level: str = "standard"):
             raise LookupError("No playable url found for song_id: 123")
 
         tool = GetMusicUrlTool()

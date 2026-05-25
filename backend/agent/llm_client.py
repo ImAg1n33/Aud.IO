@@ -1,11 +1,17 @@
+"""LLM client — unified httpx async backend for both streaming and non-streaming calls.
+
+v0.3: 全量迁移 urllib → httpx，消除双重 HTTP 客户端混用。
+"""
+
 import json
+import logging
 import os
 from collections.abc import AsyncGenerator
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 def _get_llm_config(model_override: str | None = None) -> dict[str, str]:
@@ -31,11 +37,13 @@ def _get_llm_config(model_override: str | None = None) -> dict[str, str]:
     }
 
 
-def _request_chat_json(
+async def _request_chat_json(
     config: dict[str, str],
     messages: list[dict[str, str]],
     temperature: float,
+    timeout: float = 30.0,
 ) -> dict[str, Any]:
+    """Async JSON-mode chat completion via httpx."""
     endpoint = f"{config['base_url'].rstrip('/')}/chat/completions"
     body = {
         "model": config["model"],
@@ -44,24 +52,22 @@ def _request_chat_json(
         "messages": messages,
     }
 
-    req = Request(
-        endpoint,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {config['api_key']}",
-        },
-        method="POST",
-    )
-
-    with urlopen(req, timeout=30) as resp:
-        raw = resp.read().decode("utf-8")
-    completion = json.loads(raw)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            endpoint,
+            json=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {config['api_key']}",
+            },
+        )
+        response.raise_for_status()
+        completion = response.json()
     content = completion["choices"][0]["message"]["content"]
     return _extract_json(content)
 
 
-def request_json_object(
+async def request_json_object(
     messages: list[dict[str, str]],
     model: str | None = None,
     temperature: float = 0.1,
@@ -73,7 +79,7 @@ def request_json_object(
     config = _get_llm_config(model_override=model)
     if not config["api_key"]:
         raise RuntimeError("LLM_API_KEY (or provider fallback key) is not configured.")
-    return _request_chat_json(config, messages, temperature)
+    return await _request_chat_json(config, messages, temperature)
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -123,8 +129,8 @@ def _normalize_response(payload: dict[str, Any], provider: str, model: str) -> d
     }
 
 
-def call_llm(prompt: str, model: str | None = None) -> dict[str, Any]:
-    """Call DeepSeek (OpenAI-compatible API) and return strict JSON.
+async def call_llm(prompt: str, model: str | None = None) -> dict[str, Any]:
+    """Call OpenAI-compatible API and return strict JSON.
 
     Response schema:
     - analysis: brief reasoning summary
@@ -159,12 +165,12 @@ def call_llm(prompt: str, model: str | None = None) -> dict[str, Any]:
     ]
 
     try:
-        parsed = _request_chat_json(config, messages, temperature=0.2)
+        parsed = await _request_chat_json(config, messages, temperature=0.2)
         return _normalize_response(parsed, config["provider"], config["model"])
-    except (HTTPError, URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError) as exc:
+    except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError, json.JSONDecodeError) as exc:
         return {
             "analysis": "Model call failed.",
-            "answer": "DeepSeek request failed, please check network/key/model settings.",
+            "answer": "LLM request failed, please check network/key/model settings.",
             "actions": [str(exc)],
             "play_keyword": "",
             "provider": config["provider"],
@@ -204,19 +210,9 @@ async def stream_llm(
 ) -> AsyncGenerator[str | dict[str, Any], None]:
     """Stream LLM response with retry logic for connection failures.
 
-    重试策略（区分两种失败场景）:
-    - 场景 A「连接建立失败」: client.stream() 本身抛异常（TCP/TLS/HTTP 握手失败，
-      DNS 解析失败，连接超时等），此时尚未向 LLM 服务端发送完整请求体，
-      且前端没有收到任何 token —— **安全重试**
-    - 场景 B「推流中途中断」: 连接已建立，但在 aiter_lines() 迭代过程中中断。
-      此时前端可能已渲染部分打字机文本，重试会导致重复/覆盖显示 —— **不重试，
-      直接上报错误**
-
-    同时顺便修复架构报告 #4.1.4 / #4.1.5 —— timeout 从硬编码改为参数。
-
     Yields:
         str  — answer text tokens (typewriter stream)
-        dict — final structured reply (含 stream_interrupted=True 标记中断场景)
+        dict — final structured reply (stream_interrupted=True marks interrupted stream)
     """
     config = _get_llm_config(model_override=model)
 
@@ -246,13 +242,12 @@ async def stream_llm(
     MARKER = "---JSON---"
 
     for attempt in range(max_retries + 1):
-        # ---- 每次重试都重置的流式状态 ----
         full_content = ""
         in_json = False
         json_buffer = ""
-        text_output = ""   # 已安全发送给调用方的干净文本
-        text_pending = ""  # 缓冲区末尾 N 字符，用于防止 MARKER 部分泄露
-        connection_ok = False  # HTTP 连接是否已建立（收到响应头）
+        text_output = ""
+        text_pending = ""
+        connection_ok = False
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -265,7 +260,6 @@ async def stream_llm(
                         "Authorization": f"Bearer {config['api_key']}",
                     },
                 ) as response:
-                    # ====== 连接已建立 ======
                     connection_ok = True
 
                     async for line in response.aiter_lines():
@@ -290,7 +284,6 @@ async def stream_llm(
                         if in_json:
                             json_buffer += delta
                         elif MARKER in full_content:
-                            # 检测到 MARKER —— 清洗剩余文本，之后内容归入 JSON 缓冲
                             parts = full_content.split(MARKER, 1)
                             clean_text = parts[0]
                             new_chars = clean_text[len(text_output):]
@@ -300,7 +293,6 @@ async def stream_llm(
                             in_json = True
                             json_buffer = parts[1] if len(parts) > 1 else ""
                         else:
-                            # 用滑动窗口防止 MARKER 部分泄露到前端显示
                             text_pending += delta
                             safe_len = max(0, len(text_pending) - len(MARKER))
                             if safe_len > 0:
@@ -309,7 +301,7 @@ async def stream_llm(
                                 text_output += safe
                                 text_pending = text_pending[safe_len:]
 
-            # ====== 流正常结束 —— 解析 JSON ======
+            # Stream completed normally — parse JSON
             try:
                 json_str = json_buffer.strip()
                 parsed = json.loads(json_str)
@@ -331,20 +323,16 @@ async def stream_llm(
             normalized["answer"] = text_answer
             normalized["stream_interrupted"] = False
             yield normalized
-            return  # ← 成功，退出重试循环
+            return
 
         except (httpx.HTTPError, httpx.TimeoutException) as exc:
-            # ====== 场景 A: 连接未建立 → 安全重试 ======
             if not connection_ok and attempt < max_retries:
-                import logging
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "LLM stream connection failed (attempt %d/%d), retrying...: %s",
                     attempt + 1, max_retries + 1, exc,
                 )
                 continue
 
-            # ====== 场景 B: 连接已建立但中途中断 → 不重试 ======
-            # 原因：前端可能已经渲染了部分打字机文本，重试会产生重复/覆盖的诡异体验
             yield {
                 "analysis": "Model call failed.",
                 "answer": (
@@ -362,7 +350,6 @@ async def stream_llm(
             return
 
         except (json.JSONDecodeError, ValueError) as exc:
-            # JSON 解析失败不属于网络问题，不重试
             yield {
                 "analysis": "Model call failed.",
                 "answer": "LLM 返回格式异常，请重试。",

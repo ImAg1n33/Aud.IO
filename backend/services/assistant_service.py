@@ -22,14 +22,20 @@ from backend.agent.context_assembler import (
     ToolSchemaProvider,
     UserPreferenceProvider,
 )
-from backend.agent.intent_classifier import IntentClassifier
+from backend.agent.intent_classifier import Intent, IntentClassifier
 from backend.agent.llm_client import call_llm, stream_llm
 from backend.agent.memory_manager import MemoryManager
-from backend.agent.prompt_builder import ENHANCED_SYSTEM_PERSONA, ENHANCED_TOOL_CONSTRAINTS
+from backend.agent.prompt_builder import (
+    ENHANCED_SYSTEM_PERSONA,
+    ENHANCED_TOOL_CONSTRAINTS,
+    PHASE2_STREAM_PERSONA,
+    build_phase1_decision_prompt,
+)
 from backend.agent.tool_executor import ToolExecutor
 from backend.memory.embedding import EmbeddingProvider
 from backend.memory.episodic_memory import EpisodicMemory
 from backend.services.session_manager import SessionManager
+from backend.tools.netease_api import get_song_mp3_url, search_first_song
 
 
 class AssistantService:
@@ -72,7 +78,7 @@ class AssistantService:
         self,
         session_id: str,
     ) -> ContextAssembler:
-        """Create a ContextAssembler wired to the current session's state."""
+        """Full assembler for Single-Pass (CHITCHAT etc.) — all providers."""
         self._ensure_memory_manager(session_id)
         ctx = self.session_manager.get_or_create(session_id)
 
@@ -86,6 +92,30 @@ class AssistantService:
             ],
             system_persona=ENHANCED_SYSTEM_PERSONA,
             tool_constraints=ENHANCED_TOOL_CONSTRAINTS,
+        )
+
+    def _build_phase2_assembler(
+        self,
+        session_id: str,
+    ) -> ContextAssembler:
+        """Ultra-light assembler for Two-Pass Phase 2.
+
+        The song is already resolved — the LLM only needs the bare minimum:
+        conversation history (last 3 turns for continuity) and the song data
+        (injected via resolved_song parameter).  No profile, no stats, no tools.
+        """
+        self._ensure_memory_manager(session_id)
+        ctx = self.session_manager.get_or_create(session_id)
+
+        return ContextAssembler(
+            providers=[
+                ConversationHistoryProvider(ctx.short_term_memory),
+                # Intentionally omit: UserPreferenceProvider, ToolSchemaProvider,
+                # CurrentlyPlayingProvider, EpisodicMemoryProvider.
+                # Phase 2 is a brief announcement, not a curation decision.
+            ],
+            system_persona=PHASE2_STREAM_PERSONA,
+            tool_constraints="",
         )
 
     # ================================================================
@@ -166,7 +196,13 @@ class AssistantService:
         self, user_input: str, context: dict[str, Any] | None,
         session_id: str | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Streaming variant: yields SSE events for real-time typewriter UX."""
+        """Streaming variant — Two-Pass for music, Single-Pass for everything else.
+
+        RFC-003: When the intent is MUSIC_PLAY or MUSIC_RECOMMEND, the pipeline
+        first silently pre-fetches the real song via search_music + get_music_url,
+        then streams the DJ script with the actual result injected into context.
+        This eliminates the hallucination mismatch between copy and playback.
+        """
         sid = self._resolve_session(session_id)
         ctx = self.session_manager.get_or_create(sid)
         self._ensure_memory_manager(sid)
@@ -179,6 +215,73 @@ class AssistantService:
         mood_bias = profile.get("mood_bias", {}) if isinstance(profile, dict) else {}
         self.episodic_provider._mood_keys = [k.lower() for k in mood_bias.keys() if k.strip()]
 
+        # ═══════════════════════════════════════════════════════════
+        # RFC-003 Two-Pass path — music intents only
+        # ═══════════════════════════════════════════════════════════
+        if intent in (Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND):
+            # ── Phase 1: Silent pre-fetch ──
+            yield self._sse("status", '{"phase":"searching"}')
+            song_data = await self._phase1_prefetch(user_input, sid, metadata)
+
+            if song_data is not None:
+                # ── Phase 2: Radio DJ timing ──
+                # 1. Music starts immediately (the "intro" plays)
+                # 2. LLM TTFT (~2s) is the natural instrumental gap
+                # 3. DJ script streams IN OVER the already-playing music
+                yield self._sse(
+                    "status",
+                    json.dumps({
+                        "phase": "found",
+                        "name": song_data["name"],
+                        "artist": song_data["artist"],
+                    }, ensure_ascii=False),
+                )
+
+                # Music first — like a radio DJ dropping the track before speaking
+                yield self._sse("music", json.dumps(song_data, ensure_ascii=False))
+
+                # Build prompt while music plays (this is fast, < 0.001s)
+                assembler = self._build_phase2_assembler(sid)
+                prompt = await assembler.assemble(
+                    user_input, intent, metadata, resolved_song=song_data,
+                )
+
+                # Stream DJ script over the already-playing music
+                reply = {}
+                async for chunk in stream_llm(prompt):
+                    if isinstance(chunk, str):
+                        yield self._sse("token", chunk)
+                    elif isinstance(chunk, dict):
+                        reply = chunk
+                        if reply.get("analysis") == "Model call failed.":
+                            yield self._sse("error", reply.get("answer", "Request failed"))
+                            return
+
+                yield self._sse("text", reply.get("answer", ""))
+
+                final_reply = {
+                    **reply,
+                    "music": song_data,
+                    "provider": reply.get("provider", ""),
+                    "model": reply.get("model", ""),
+                }
+                ctx.short_term_memory.add_turn(
+                    user_input, reply.get("answer", ""),
+                    intent=str(intent), played_song=song_data,
+                )
+                asyncio.ensure_future(
+                    self.episodic_memory.store_snapshot(
+                        user_input, reply.get("answer", ""),
+                        played_song=song_data, session_id=sid,
+                    )
+                )
+                yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
+                return
+            # Phase 1 failed — fall through to Single-Pass below
+
+        # ═══════════════════════════════════════════════════════════
+        # Single-Pass path — chitchat, weather, unknown, or Two-Pass fallback
+        # ═══════════════════════════════════════════════════════════
         assembler = self._build_context_assembler(sid)
         prompt = await assembler.assemble(user_input, intent, metadata)
 
@@ -232,6 +335,52 @@ class AssistantService:
         )
 
         yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
+
+    # ═══════════════════════════════════════════════════════════════
+    # RFC-003 helpers
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _phase1_prefetch(
+        self, user_input: str, sid: str, metadata: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Phase 1: silently extract play_keyword → search → resolve mp3_url.
+
+        Returns song_data dict on success, None on any failure (search miss,
+        copyright block, network error).  On None the caller falls back to
+        Single-Pass which has its own retry / graceful-degradation logic.
+
+        Uses a minimal prompt — no full context assembly — because Phase 1
+        only needs to extract a search keyword, not write a DJ script.
+        """
+        # 1a: Quick decision with minimal prompt
+        currently_playing = (metadata or {}).get("Currently Playing", "")
+        decision_prompt = build_phase1_decision_prompt(
+            user_input,
+            currently_playing=currently_playing if currently_playing != "None" else "",
+        )
+
+        try:
+            decision = await call_llm(decision_prompt)
+        except Exception:
+            return None
+
+        play_kw = (decision.get("play_keyword") or "").strip()
+        if not play_kw:
+            return None
+
+        # 1b: Search + resolve MP3 URL — one shot, no degraded retry
+        try:
+            search_result = await search_first_song(play_kw)
+            mp3_url = await get_song_mp3_url(search_result["id"])
+            return {
+                "song_id": search_result["id"],
+                "name": search_result["name"],
+                "artist": search_result["artist"],
+                "mp3_url": mp3_url,
+                "requested_keyword": play_kw,
+            }
+        except Exception:
+            return None
 
     @staticmethod
     def _sse(event: str, data: str) -> str:

@@ -8,6 +8,7 @@ from backend.agent.intent_classifier import Intent
 from backend.agent.memory_manager import MemoryManager
 from backend.memory.conversation_memory import ConversationMemory
 from backend.memory.episodic_memory import EpisodicMemory, EpisodicSnapshot
+from backend.agent.prompt_builder import format_resolved_song
 from backend.tools.base import tool_registry
 
 
@@ -246,8 +247,15 @@ class ContextAssembler:
         user_input: str,
         intent: Intent,
         metadata: dict[str, Any] | None = None,
+        resolved_song: dict[str, Any] | None = None,
     ) -> str:
-        """Build the full prompt by calling each provider and concatenating non-None results."""
+        """Build the full prompt by calling each provider and concatenating non-None results.
+
+        Args:
+            resolved_song: (RFC-003) If set, injects the real song data so the LLM
+                           can craft its DJ script around the actual search result
+                           instead of hallucinating.
+        """
         meta = dict(metadata or {})
         context_blocks: list[str] = []
 
@@ -270,6 +278,9 @@ class ContextAssembler:
             self.system_persona,
             self.tool_constraints,
         ]
+
+        if resolved_song:
+            sections.append(format_resolved_song(resolved_song))
 
         if raw_block:
             sections.append(f"Additional Context:\n{raw_block}")

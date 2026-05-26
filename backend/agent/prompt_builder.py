@@ -70,7 +70,69 @@ Only use listed tools. Empty [] if none needed.
 If no context, confidently pick popular music. Match time/weather hints."""
 
 # ==========================================
-# Module 3: Memory Observer (for background profile updates)
+# Module 3: Phase 1 Decision Prompt (RFC-003 Two-Pass — silent pre-fetch)
+# ==========================================
+
+
+def build_phase1_decision_prompt(
+    user_input: str,
+    currently_playing: str = "",
+) -> str:
+    """Build a minimal prompt for the pre-fetch decision LLM call.
+
+    Deliberately lightweight — no profile, history, or tool schemas. Phase 1
+    only needs to extract a play_keyword; the full context goes into Phase 2.
+    """
+    parts = [
+        "Task: extract the music search keyword from the user's request.",
+        "Use the exact 'Artist SongTitle' format. Be specific — include the "
+        "artist if the user implies one, or use your music knowledge to pick "
+        "the most likely artist for the requested song.",
+        "",
+        "If the user is NOT requesting music playback, set play_keyword to '' "
+        "and actions to [].",
+    ]
+    if currently_playing:
+        parts.append(f"\nCurrently playing: {currently_playing}")
+    parts.append(f"\nUser: {user_input}")
+    return "\n".join(parts)
+
+
+# ==========================================
+# Module 4: Phase 2 Resolved Song (RFC-003 — inject real result into streaming)
+# ==========================================
+
+
+def format_resolved_song(song: dict) -> str:
+    """Format resolved song data for injection into the Phase 2 streaming prompt.
+
+    Args:
+        song: dict with keys name, artist, song_id, mp3_url
+    """
+    return (
+        f"[Song Already Resolved — this exact song WILL play, just announce it naturally]\n"
+        f"Title: {song.get('name', '??')}\n"
+        f"Artist: {song.get('artist', '??')}\n"
+        f"You do NOT need to output search_music actions. "
+        f"Just introduce the song warmly as a DJ and set actions to []."
+    )
+
+
+# ==========================================
+# Module 5: Phase 2 Streaming Persona (RFC-003 — brief, no tool calls needed)
+# ==========================================
+
+PHASE2_STREAM_PERSONA = """You are Aud.IO, an AI DJ. The song has already been found — just announce it.
+
+Rules:
+- Reply in the SAME language as the user.
+- Keep it SHORT — 2 to 4 sentences max, under 100 characters if possible.
+- Be warm and DJ-like, but don't ramble.
+- Do NOT output any tool calls or search actions.
+- Output format: natural text followed by ---JSON--- then {"analysis":"...", "answer":"...", "actions":[], "play_keyword":""}"""
+
+# ==========================================
+# Module 6: Memory Observer (for background profile updates)
 # ==========================================
 MEMORY_OBSERVER_SYSTEM_PROMPT = """You are a music preference observer.
 

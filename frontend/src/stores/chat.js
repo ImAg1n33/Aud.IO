@@ -50,6 +50,21 @@ function handleSSE(event, data, store, player) {
       }
       break
 
+    case 'status':
+      try {
+        const status = JSON.parse(data)
+        if (status.phase === 'searching') {
+          store.responseText = '> Searching...'
+          store.responseColor = 'var(--text-disabled)'
+        } else if (status.phase === 'found') {
+          // Reset for the incoming stream — wipe the "Searching..." prefix
+          resetTyping()
+          store.responseText = '> '
+          store.responseColor = 'var(--text-primary)'
+        }
+      } catch (e) { /* ignore malformed status */ }
+      break
+
     case 'music':
       try {
         const music = JSON.parse(data)

@@ -22,6 +22,7 @@ backend/memory/user_profile_*.json
 backend/memory/episodes.db
 backend/memory/memory_update.log
 backend/memory/chroma_episodes/
+backend/.chroma_cache/
 backend/qrcode.png
 
 # Frontend

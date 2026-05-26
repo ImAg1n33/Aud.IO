@@ -234,6 +234,7 @@ async def stream_llm(
         "model": config["model"],
         "temperature": 0.2,
         "stream": True,
+        "max_tokens": 400,  # DJ script + JSON ≈ 150-300 tokens; cap prevents rambling
         "messages": [
             {"role": "user", "content": full_prompt},
         ],

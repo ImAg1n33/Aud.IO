@@ -81,10 +81,19 @@ class UserPreferenceProvider(ContextProvider):
 
 
 class CurrentlyPlayingProvider(ContextProvider):
+    """Injects the frontend's currently-playing track into the LLM context.
+
+    Contract: the frontend sends ``{"Currently Playing": "Artist - SongName"}``
+    in the request context.  This provider reads that key and returns a formatted
+    context block.  If the key is missing or set to ``"None"``, nothing is injected.
+    """
+
     name = "currently_playing"
+    # Canonical key name — keep in sync with frontend App.vue
+    KEY = "Currently Playing"
 
     async def get_context(self, intent: Intent, user_input: str, metadata: dict[str, Any]) -> str | None:
-        currently_playing = metadata.get("Currently Playing")
+        currently_playing = metadata.get(self.KEY)
         if not currently_playing or currently_playing == "None":
             return None
         return f"[Currently Playing]\n{currently_playing}"

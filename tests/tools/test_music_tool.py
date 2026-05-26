@@ -1,7 +1,8 @@
 import pytest
 
-from backend.tools.base import MusicCopyrightError, MusicSearchError, tool_registry
+from backend.tools.base import MusicCopyrightError, MusicSearchError, ToolExecutionError, tool_registry
 from backend.tools.music_tool import GetMusicUrlTool, SearchMusicTool
+from backend.tools.netease_api import CookieExpiredError
 
 
 @pytest.fixture
@@ -90,3 +91,35 @@ class TestGetMusicUrlTool:
 
     def test_registered(self, ensure_music_tools) -> None:
         assert "get_music_url" in tool_registry
+
+
+class TestCookieExpiredHandling:
+    """Verify CookieExpiredError is caught and surfaced as a tool error."""
+
+    @pytest.mark.asyncio
+    async def test_search_returns_error_on_expired_cookie(self, monkeypatch) -> None:
+        async def fake_search(keyword: str):
+            raise CookieExpiredError("Cookie expired — re-login required")
+
+        monkeypatch.setattr(
+            "backend.tools.music_tool.search_first_song", fake_search,
+        )
+        tool = SearchMusicTool()
+        result = await tool.execute(keyword="test")
+        assert result.success is False
+        assert isinstance(result.error, MusicSearchError)
+        assert "Cookie expired" in str(result.error)
+
+    @pytest.mark.asyncio
+    async def test_get_url_returns_error_on_expired_cookie(self, monkeypatch) -> None:
+        async def fake_get_url(song_id: str, level: str = "standard"):
+            raise CookieExpiredError("Cookie expired")
+
+        monkeypatch.setattr(
+            "backend.tools.music_tool.get_song_mp3_url", fake_get_url,
+        )
+        tool = GetMusicUrlTool()
+        result = await tool.execute(song_id="123")
+        assert result.success is False
+        assert isinstance(result.error, ToolExecutionError)
+        assert "Cookie expired" in str(result.error)

@@ -285,3 +285,120 @@ class TestSessionIsolation:
         service.session_manager.get_or_create("touch-test")
         assert service.session_manager.heartbeat("touch-test") is True
         assert service.session_manager.heartbeat("nonexistent") is False
+
+
+class TestTwoPassStreaming:
+    """Verify RFC-003 Two-Pass pipeline — event ordering, fallback, and accuracy."""
+
+    @pytest.mark.asyncio
+    async def test_two_pass_sends_status_searching_then_found(self, service, monkeypatch) -> None:
+        """Phase 1 success → status:searching → status:found → music → token → text → done."""
+        async def fake_decision(prompt: str, model: str | None = None):
+            return {
+                "analysis": "ok", "answer": "", "actions": [],
+                "play_keyword": "Test Song",
+                "provider": "test", "model": "test",
+            }
+
+        async def fake_search(keyword: str):
+            return {"id": "123", "name": "Test Song", "artist": "Test Artist"}
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return "http://example.com/test.mp3"
+
+        async def fake_stream(prompt: str, **kw):
+            yield "Hello"
+            yield {
+                "analysis": "ok", "answer": "Hello!", "actions": [],
+                "play_keyword": "", "provider": "test", "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.call_llm", fake_decision,
+        )
+        monkeypatch.setattr(
+            "backend.services.assistant_service.search_first_song", fake_search,
+        )
+        monkeypatch.setattr(
+            "backend.services.assistant_service.get_song_mp3_url", fake_mp3,
+        )
+        monkeypatch.setattr(
+            "backend.services.assistant_service.stream_llm", fake_stream,
+        )
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "play Test Song", {}, session_id="two-pass-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        # Verify correct event sequence
+        assert "status" in event_types
+        assert "music" in event_types
+        assert "token" in event_types
+        assert "text" in event_types
+        assert "done" in event_types
+        # Music MUST come before text (radio DJ timing)
+        music_idx = event_types.index("music")
+        text_idx = event_types.index("text")
+        assert music_idx < text_idx, f"music event must precede text, got music@{music_idx} text@{text_idx}"
+
+    @pytest.mark.asyncio
+    async def test_two_pass_falls_back_on_phase1_failure(self, service, monkeypatch) -> None:
+        """When Phase 1 returns None, the pipeline falls through to Single-Pass."""
+        async def fake_decision(prompt: str, model: str | None = None):
+            return {
+                "analysis": "ok", "answer": "", "actions": [],
+                "play_keyword": "",  # ← empty → Phase 1 fails
+                "provider": "test", "model": "test",
+            }
+
+        async def fake_stream(prompt: str, **kw):
+            yield {
+                "analysis": "ok", "answer": "fallback", "actions": [],
+                "play_keyword": "", "provider": "test", "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.call_llm", fake_decision,
+        )
+        monkeypatch.setattr(
+            "backend.services.assistant_service.stream_llm", fake_stream,
+        )
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "hello", {}, session_id="fallback-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        assert "done" in event_types  # single-pass still completes
+
+    @pytest.mark.asyncio
+    async def test_chitchat_uses_single_pass(self, service, monkeypatch) -> None:
+        """CHITCHAT intent goes directly to Single-Pass (no Two-Pass overhead)."""
+        async def fake_stream(prompt: str, **kw):
+            yield {
+                "analysis": "ok", "answer": "Hi there!", "actions": [],
+                "play_keyword": "", "provider": "test", "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.stream_llm", fake_stream,
+        )
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "hello how are you", {}, session_id="chitchat-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        # CHITCHAT should NOT have status events (no Two-Pass)
+        assert "status" not in event_types
+        assert "done" in event_types

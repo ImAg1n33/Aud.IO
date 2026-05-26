@@ -13,11 +13,8 @@ from backend.agent.memory_manager import MemoryManager
 from backend.agent.prompt_builder import (
     ENHANCED_SYSTEM_PERSONA,
     ENHANCED_TOOL_CONSTRAINTS,
-    SYSTEM_PERSONA,
-    TOOL_CONSTRAINTS,
-    build_phase1_decision_prompt,
-    build_prompt,
     build_memory_observer_messages,
+    build_phase1_decision_prompt,
     format_resolved_song,
 )
 from backend.agent.tool_executor import ToolExecutor
@@ -42,12 +39,8 @@ __all__ = [
     "EpisodicMemoryProvider",
     # Tool execution
     "ToolExecutor",
-    # Prompts (legacy)
-    "build_prompt",
+    # Prompts
     "build_memory_observer_messages",
-    "SYSTEM_PERSONA",
-    "TOOL_CONSTRAINTS",
-    # Prompts (enhanced)
     "ENHANCED_SYSTEM_PERSONA",
     "ENHANCED_TOOL_CONSTRAINTS",
     # RFC-003 Two-Pass

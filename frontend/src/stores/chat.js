@@ -7,22 +7,22 @@ let typeQueue = []
 let typeTimer = null
 const TYPE_SPEED = 28 // ms per character
 
-function flushTypeQueue(responseText) {
+function flushTypeQueue(store) {
   if (typeQueue.length === 0) {
     if (typeTimer) { clearInterval(typeTimer); typeTimer = null }
     return
   }
   const chars = typeQueue.splice(0, 2)
-  responseText.value += chars.join('')
+  store.responseText += chars.join('')
   if (typeQueue.length === 0) {
     clearInterval(typeTimer)
     typeTimer = null
   }
 }
 
-function startTyping(responseText) {
+function startTyping(store) {
   if (!typeTimer && typeQueue.length > 0) {
-    typeTimer = setInterval(() => flushTypeQueue(responseText), TYPE_SPEED)
+    typeTimer = setInterval(() => flushTypeQueue(store), TYPE_SPEED)
   }
 }
 

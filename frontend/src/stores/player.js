@@ -34,6 +34,13 @@ export const usePlayerStore = defineStore('player', {
       }
     },
 
+    /** Ensure AudioContext is running (browsers suspend it without user gesture). */
+    async _ensureAudioRunning() {
+      if (audioCtx && audioCtx.state === 'suspended') {
+        await audioCtx.resume()
+      }
+    },
+
     // ── Fade helpers ──
 
     _fadeOut(duration = 1.5) {
@@ -53,12 +60,22 @@ export const usePlayerStore = defineStore('player', {
     // ── Playback controls ──
 
     /** Start playing a new track. Called from chat store on SSE "music" event. */
-    playTrack(track) {
-      if (!track?.mp3_url || !audioElement) return
-      this.attachAudio(audioElement) // ensure AudioContext is ready
+    async playTrack(track) {
+      if (!track?.mp3_url) return
+      if (!audioElement) return
+      this.attachAudio(audioElement)
+      await this._ensureAudioRunning()
+
+      // Cancel any pending fades (from stopTrack) and reset gain immediately
+      if (fadeGain) {
+        fadeGain.gain.cancelScheduledValues(audioCtx.currentTime)
+        fadeGain.gain.setValueAtTime(1, audioCtx.currentTime)
+      }
+
       audioElement.src = track.mp3_url
-      audioElement.play()
-      this._fadeIn(0.6)
+      audioElement.play().catch((e) => {
+        console.error('Audio playback failed:', e.name, e.message)
+      })
       this.isPlaying = true
       this.currentTrack = track
       this.trackDisplay = `♪ ${track.name} - ${track.artist} ♪`
@@ -74,7 +91,7 @@ export const usePlayerStore = defineStore('player', {
       }, 1300)
     },
 
-    togglePlay() {
+    async togglePlay() {
       if (!audioElement) return
       this.attachAudio(audioElement)
       if (this.isPlaying) {
@@ -84,6 +101,7 @@ export const usePlayerStore = defineStore('player', {
           this.isPlaying = false
         }, 600)
       } else {
+        await this._ensureAudioRunning()
         audioElement.play()
         this._fadeIn(0.3)
         this.isPlaying = true

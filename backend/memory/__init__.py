@@ -10,7 +10,7 @@ from backend.memory.episodic_memory import (
     EpisodicSnapshot,
     MoodDetector,
 )
-from backend.memory.profile_schema import UserProfile, atomic_write_json, load_profile
+from backend.memory.profile_schema import VALID_MOODS, UserProfile, atomic_write_json, load_profile
 
 __all__ = [
     "ConversationMemory",
@@ -23,6 +23,7 @@ __all__ = [
     "EpisodicSnapshot",
     "MoodDetector",
     "UserProfile",
+    "VALID_MOODS",
     "atomic_write_json",
     "load_profile",
 ]

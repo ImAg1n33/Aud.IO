@@ -3,6 +3,7 @@ from backend.agent.context_assembler import (
     ContextProvider,
     ConversationHistoryProvider,
     CurrentlyPlayingProvider,
+    EnvironmentProvider,
     EpisodicMemoryProvider,
     ToolSchemaProvider,
     UserPreferenceProvider,
@@ -13,6 +14,7 @@ from backend.agent.memory_manager import MemoryManager
 from backend.agent.prompt_builder import (
     ENHANCED_SYSTEM_PERSONA,
     ENHANCED_TOOL_CONSTRAINTS,
+    INTENT_CLASSIFIER_SYSTEM_PROMPT,
     build_memory_observer_messages,
     build_phase1_decision_prompt,
     format_resolved_song,
@@ -37,6 +39,7 @@ __all__ = [
     "CurrentlyPlayingProvider",
     "ToolSchemaProvider",
     "EpisodicMemoryProvider",
+    "EnvironmentProvider",
     # Tool execution
     "ToolExecutor",
     # Prompts
@@ -46,4 +49,6 @@ __all__ = [
     # RFC-003 Two-Pass
     "build_phase1_decision_prompt",
     "format_resolved_song",
+    # RFC-004 Intent Classifier
+    "INTENT_CLASSIFIER_SYSTEM_PROMPT",
 ]

@@ -1,14 +1,31 @@
-"""Lightweight, rule-based intent classifier — zero LLM cost."""
+"""Hybrid intent classifier — LLM primary with keyword fallback (RFC-004)."""
 
+import asyncio
+import json
+import os
 from enum import Enum
 from typing import ClassVar
 
+import httpx
+
+from backend.agent.prompt_builder import INTENT_CLASSIFIER_SYSTEM_PROMPT
+
+# ── LLM config (reuses same credentials, different timeout) ──
+
+_CLASSIFY_TIMEOUT = 1.5  # seconds — hard deadline, fallback kicks in after this
+_CLASSIFY_MODEL = os.getenv("LLM_MODEL", "").strip() or "deepseek-v4-flash"
+_CLASSIFY_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
+_CLASSIFY_API_KEY = (
+    os.getenv("LLM_API_KEY", "").strip()
+    or os.getenv("DEEPSEEK_API_KEY", "").strip()
+)
+
 
 class Intent(str, Enum):
-    MUSIC_PLAY = "music_play"          # "play", "put on", "播放"
-    MUSIC_RECOMMEND = "music_recommend" # "recommend", "what should I listen to"
-    WEATHER = "weather"                # "weather", "天气"
-    CHITCHAT = "chitchat"             # casual conversation
+    MUSIC_PLAY = "music_play"
+    MUSIC_RECOMMEND = "music_recommend"
+    WEATHER = "weather"
+    CHITCHAT = "chitchat"
     UNKNOWN = "unknown"
 
 
@@ -34,6 +51,65 @@ class IntentClassifier:
         "weather", "天气", "下雨", "晴天", "下雪", "温度", "刮风",
         "阴天", "多云", "外面", "how's the weather",
     ]
+
+    # ═══════════════════════════════════════════════════════════════
+    # RFC-004: LLM primary path with 1.5s timeout fallback
+    # ═══════════════════════════════════════════════════════════════
+
+    async def classify_async(self, user_input: str) -> Intent:
+        """Classify via LLM with keyword fallback.
+
+        The LLM path is given 1.5 s to respond.  Any failure — timeout,
+        network error, bad JSON, unknown label — falls through to the
+        deterministic keyword classifier (zero cost, < 1 ms).
+        """
+        try:
+            intent = await asyncio.wait_for(
+                self._classify_via_llm(user_input),
+                timeout=_CLASSIFY_TIMEOUT,
+            )
+            if isinstance(intent, Intent):
+                return intent
+        except Exception:
+            pass
+        return self.classify(user_input)
+
+    async def _classify_via_llm(self, user_input: str) -> Intent:
+        """Raw LLM call — raises on any failure so the caller can fall back."""
+        if not _CLASSIFY_API_KEY:
+            raise RuntimeError("LLM_API_KEY not configured")
+
+        endpoint = f"{_CLASSIFY_BASE_URL.rstrip('/')}/chat/completions"
+        body = {
+            "model": _CLASSIFY_MODEL,
+            "temperature": 0,
+            "max_tokens": 10,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": INTENT_CLASSIFIER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_input},
+            ],
+        }
+
+        async with httpx.AsyncClient(timeout=_CLASSIFY_TIMEOUT) as client:
+            response = await client.post(
+                endpoint,
+                json=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {_CLASSIFY_API_KEY}",
+                },
+            )
+            response.raise_for_status()
+
+        payload = response.json()
+        label = payload["choices"][0]["message"]["content"].strip()
+        parsed = json.loads(label)
+        return Intent(parsed["intent"])
+
+    # ═══════════════════════════════════════════════════════════════
+    # Deterministic keyword path (unchanged, < 1 ms, always available)
+    # ═══════════════════════════════════════════════════════════════
 
     def classify(self, user_input: str, conversation_history: list | None = None) -> Intent:
         """Classify user input into an intent category.

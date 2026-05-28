@@ -1,14 +1,20 @@
 """Dynamic context assembly with pluggable providers, replacing static prompt_builder."""
 
+import asyncio
 import json
+import os
+import time
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any
+
+import httpx
 
 from backend.agent.intent_classifier import Intent
 from backend.agent.memory_manager import MemoryManager
+from backend.agent.prompt_builder import format_resolved_song
 from backend.memory.conversation_memory import ConversationMemory
 from backend.memory.episodic_memory import EpisodicMemory, EpisodicSnapshot
-from backend.agent.prompt_builder import format_resolved_song
 from backend.tools.base import tool_registry
 
 
@@ -97,6 +103,106 @@ class CurrentlyPlayingProvider(ContextProvider):
         if not currently_playing or currently_playing == "None":
             return None
         return f"[Currently Playing]\n{currently_playing}"
+
+
+# ============================================================
+# RFC-005: Environment Provider — weather + time of day
+# ============================================================
+
+# Weather cache — module-level, shared across all requests
+_weather_cache: dict[str, Any] = {"data": "", "ts": 0.0}
+_WEATHER_CACHE_TTL = 1800  # 30 minutes
+_WEATHER_TIMEOUT = 1.5     # hard timeout — must not block the pipeline
+
+
+async def _fetch_weather(city: str) -> str:
+    """Fetch current weather from wttr.in (free, no API key).
+
+    Silently returns "" on any failure — the DJ pipeline MUST NOT be blocked.
+    """
+    query = city.strip() or ""
+    url = f"https://wttr.in/{query}?format=%C+%t" if query else "https://wttr.in/?format=%C+%t"
+    try:
+        async with httpx.AsyncClient(timeout=_WEATHER_TIMEOUT) as client:
+            resp = await client.get(url, headers={"User-Agent": "Aud.IO/0.2"})
+            resp.raise_for_status()
+            return resp.text.strip()
+    except Exception:
+        return ""
+
+
+async def _get_weather_cached() -> str:
+    """Return cached weather immediately; refresh in background if stale.
+
+    NEVER blocks the pipeline.  On cache miss → empty string; on stale
+    cache → return stale data + schedule background refresh.
+    """
+    now = time.monotonic()
+    stale = (now - _weather_cache["ts"]) >= _WEATHER_CACHE_TTL
+    city = os.getenv("WEATHER_CITY", "").strip()
+
+    if not _weather_cache["data"]:
+        # First request since startup — fire background fetch, return empty
+        asyncio.ensure_future(_refresh_weather(city))
+        return ""
+    elif stale:
+        # Cache expired — return stale data, refresh in background
+        asyncio.ensure_future(_refresh_weather(city))
+
+    return _weather_cache["data"]
+
+
+async def _refresh_weather(city: str) -> None:
+    """Background task: fetch weather and populate cache."""
+    data = await _fetch_weather(city)
+    if data:
+        _weather_cache["data"] = data
+        _weather_cache["ts"] = time.monotonic()
+
+
+def _time_period() -> str:
+    """Map current hour to a human-readable time-of-day label.
+
+    Uses local time (respects TZ env var in Docker, system timezone otherwise).
+    """
+    from datetime import timezone as tz, timedelta
+
+    # Python datetime.now() returns the system local time.
+    # Docker containers default to UTC — set TZ=Asia/Shanghai in docker-compose.
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return "morning"
+    elif 12 <= hour < 17:
+        return "afternoon"
+    elif 17 <= hour < 21:
+        return "evening"
+    return "night"
+
+
+class EnvironmentProvider(ContextProvider):
+    """Injects current time and weather into the LLM context.
+
+    Weather is fetched from wttr.in with a 30-min cache and 1.5 s hard
+    timeout.  Any failure returns "" silently — the pipeline never waits.
+    """
+
+    name = "environment"
+
+    async def get_context(self, intent: Intent, user_input: str, metadata: dict[str, Any]) -> str | None:
+        period = _time_period()
+        weather = await _get_weather_cached()
+
+        parts = [f"Time: {period}"]
+        if weather:
+            parts.append(f"Weather: {weather}")
+
+        lines = "[Current Environment]\n" + "\n".join(parts)
+        lines += (
+            "\n(Use the time of day naturally in your greeting. "
+            "Reference weather ONLY if it genuinely fits the mood — "
+            "never force it or invent details like wind/rain that aren't shown above.)"
+        )
+        return lines
 
 
 class ToolSchemaProvider(ContextProvider):

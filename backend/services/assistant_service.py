@@ -18,6 +18,7 @@ from backend.agent.context_assembler import (
     ContextAssembler,
     ConversationHistoryProvider,
     CurrentlyPlayingProvider,
+    EnvironmentProvider,
     EpisodicMemoryProvider,
     ToolSchemaProvider,
     UserPreferenceProvider,
@@ -84,6 +85,7 @@ class AssistantService:
 
         return ContextAssembler(
             providers=[
+                EnvironmentProvider(),
                 ConversationHistoryProvider(ctx.short_term_memory),
                 UserPreferenceProvider(ctx.memory_manager, self.episodic_memory),
                 CurrentlyPlayingProvider(),
@@ -109,10 +111,8 @@ class AssistantService:
 
         return ContextAssembler(
             providers=[
+                EnvironmentProvider(),
                 ConversationHistoryProvider(ctx.short_term_memory),
-                # Intentionally omit: UserPreferenceProvider, ToolSchemaProvider,
-                # CurrentlyPlayingProvider, EpisodicMemoryProvider.
-                # Phase 2 is a brief announcement, not a curation decision.
             ],
             system_persona=PHASE2_STREAM_PERSONA,
             tool_constraints="",
@@ -132,7 +132,7 @@ class AssistantService:
         self._ensure_memory_manager(sid)
 
         # === PERCEIVE ===
-        intent = self.intent_classifier.classify(user_input)
+        intent = await self.intent_classifier.classify_async(user_input)
         metadata: dict[str, Any] = dict(context or {})
 
         # Refresh mood keys from per-session profile
@@ -208,7 +208,7 @@ class AssistantService:
         self._ensure_memory_manager(sid)
 
         # === PERCEIVE ===
-        intent = self.intent_classifier.classify(user_input)
+        intent = await self.intent_classifier.classify_async(user_input)
         metadata: dict[str, Any] = dict(context or {})
 
         profile = ctx.memory_manager.get_profile()

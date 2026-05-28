@@ -2,6 +2,15 @@ import json
 from typing import Any, Mapping
 
 # ==========================================
+# RFC-004: Intent Classifier Prompt — ultra-lean, 25 tokens, JSON output
+# ==========================================
+
+INTENT_CLASSIFIER_SYSTEM_PROMPT = (
+    "Classify user intent into one label. Output ONLY: {\"intent\":\"<label>\"}\n"
+    "Labels: music_play music_recommend weather chitchat unknown"
+)
+
+# ==========================================
 # Module 1: Enhanced Persona — for the ContextAssembler pipeline
 # ==========================================
 ENHANCED_SYSTEM_PERSONA = """You are Aud.IO, an intelligent AI DJ and music companion.
@@ -116,8 +125,13 @@ Input:
 
 Task:
 1) Determine if the user expressed new preference signals (like / skip / dislike).
-2) Extract new tags the user mentioned (e.g., rainy day, coding, workout).
-3) Output a JSON object — no explanatory text.
+2) If the user mentions a GENRE (jazz, rock, pop, lofi, city pop, etc.), add it
+   to /core_taste.  NEVER put a genre into /mood_bias.
+3) If the user mentions a MOOD from the list below, add a mapping in /mood_bias
+   from that mood to the genre that was played.
+
+VALID moods (ONLY these may appear as /mood_bias keys):
+calm, focused, happy, sad, romantic, rainy, sleepy, energetic, driving, nostalgic
 
 Output rules:
 1) If there are clear changes, return JSON Patch: {"patch": [...]}.

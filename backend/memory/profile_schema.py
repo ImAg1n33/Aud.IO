@@ -8,6 +8,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+# ============================================================
+# RFC-005: canonical mood labels — single source of truth
+# ============================================================
+
+# Must stay in sync with MoodDetector output tags in episodic_memory.py.
+# Genre names (jazz, rock, pop, etc.) are NEVER valid mood keys.
+VALID_MOODS: frozenset[str] = frozenset({
+    "calm", "focused", "happy", "sad", "romantic",
+    "rainy", "sleepy", "energetic", "driving", "nostalgic",
+})
+
 
 # ============================================================
 # Models
@@ -44,8 +55,8 @@ class UserProfile(BaseModel):
         if "mood_bias" in data and isinstance(data["mood_bias"], dict):
             cleaned: dict[str, list[str]] = {}
             for key, value in data["mood_bias"].items():
-                key_str = str(key).strip()
-                if key_str:
+                key_str = str(key).strip().lower()
+                if key_str and key_str in VALID_MOODS:
                     cleaned[key_str] = _coerce_string_list(value)
             data["mood_bias"] = cleaned
         return data

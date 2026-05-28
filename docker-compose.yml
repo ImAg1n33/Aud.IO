@@ -39,6 +39,7 @@ services:
     # 显式覆盖 Docker 内部通信所需的地址（不污染 .env）
     environment:
       - NETEASE_API_BASE_URL=http://netease:3000
+      - TZ=Asia/Shanghai
 
     volumes:
       # 记忆数据持久化 —— 整个 memory 目录挂载到宿主机

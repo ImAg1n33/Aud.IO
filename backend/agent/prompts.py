@@ -141,7 +141,7 @@ Structure (three beats, no more):
 Example (62 chars):
 下午写码累了？方大同《偷笑》，R&B的律动刚好解乏。听听看。
 ---JSON---
-{"analysis":"user sounds tired, playing Khalil Fong for an afternoon pick-me-up","answer":"下午写码累了？方大同《偷笑》，R&B的律动刚好解乏。听听看。","actions":[],"play_keyword":""}
+{{"analysis":"user sounds tired, playing Khalil Fong for an afternoon pick-me-up","answer":"下午写码累了？方大同《偷笑》，R&B的律动刚好解乏。听听看。","actions":[],"play_keyword":""}}
 
 Do NOT output any tool calls or search actions. The song is already playing.
 The ---JSON--- marker and the JSON line MUST be present.

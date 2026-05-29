@@ -1,5 +1,9 @@
-"""Dynamic context assembly with pluggable providers, replacing static prompt_builder."""
+"""Dynamic context assembly with pluggable providers.
 
+v0.4 (RFC-007): ContextAssembler now only assembles the user-prompt portion
+(context blocks + user input).  System-level prompts (identity, task, output
+schema) are handled by callers via prompts.py and sent as role="system".
+"""
 import asyncio
 import json
 import os
@@ -12,7 +16,7 @@ import httpx
 
 from backend.agent.intent_classifier import Intent
 from backend.agent.memory_manager import MemoryManager
-from backend.agent.prompt_builder import format_resolved_song
+from backend.agent.prompts import format_resolved_song
 from backend.memory.conversation_memory import ConversationMemory
 from backend.memory.episodic_memory import EpisodicMemory, EpisodicSnapshot
 from backend.tools.base import tool_registry
@@ -60,13 +64,11 @@ class UserPreferenceProvider(ContextProvider):
         self._episodic = episodic
 
     async def get_context(self, intent: Intent, user_input: str, metadata: dict[str, Any]) -> str | None:
-        # Only inject for music intents
         if intent not in {Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND}:
             return None
 
         summary = self._manager.get_preference_summary()
 
-        # Data-driven stats from episodic memory
         stats_block: str | None = None
         if self._episodic:
             stats = await self._episodic.get_preference_stats()
@@ -87,15 +89,9 @@ class UserPreferenceProvider(ContextProvider):
 
 
 class CurrentlyPlayingProvider(ContextProvider):
-    """Injects the frontend's currently-playing track into the LLM context.
-
-    Contract: the frontend sends ``{"Currently Playing": "Artist - SongName"}``
-    in the request context.  This provider reads that key and returns a formatted
-    context block.  If the key is missing or set to ``"None"``, nothing is injected.
-    """
+    """Injects the frontend's currently-playing track into the LLM context."""
 
     name = "currently_playing"
-    # Canonical key name — keep in sync with frontend App.vue
     KEY = "Currently Playing"
 
     async def get_context(self, intent: Intent, user_input: str, metadata: dict[str, Any]) -> str | None:
@@ -109,22 +105,17 @@ class CurrentlyPlayingProvider(ContextProvider):
 # RFC-005: Environment Provider — weather + time of day
 # ============================================================
 
-# Weather cache — module-level, shared across all requests
 _weather_cache: dict[str, Any] = {"data": "", "ts": 0.0}
-_WEATHER_CACHE_TTL = 1800  # 30 minutes
-_WEATHER_TIMEOUT = 1.5     # hard timeout — must not block the pipeline
+_WEATHER_CACHE_TTL = 1800
+_WEATHER_TIMEOUT = 1.5
 
 
 async def _fetch_weather(city: str) -> str:
-    """Fetch current weather from wttr.in (free, no API key).
-
-    Silently returns "" on any failure — the DJ pipeline MUST NOT be blocked.
-    """
     query = city.strip() or ""
     url = f"https://wttr.in/{query}?format=%C+%t" if query else "https://wttr.in/?format=%C+%t"
     try:
         async with httpx.AsyncClient(timeout=_WEATHER_TIMEOUT) as client:
-            resp = await client.get(url, headers={"User-Agent": "Aud.IO/0.2"})
+            resp = await client.get(url, headers={"User-Agent": "Aud.IO/0.3"})
             resp.raise_for_status()
             return resp.text.strip()
     except Exception:
@@ -132,28 +123,20 @@ async def _fetch_weather(city: str) -> str:
 
 
 async def _get_weather_cached() -> str:
-    """Return cached weather immediately; refresh in background if stale.
-
-    NEVER blocks the pipeline.  On cache miss → empty string; on stale
-    cache → return stale data + schedule background refresh.
-    """
     now = time.monotonic()
     stale = (now - _weather_cache["ts"]) >= _WEATHER_CACHE_TTL
     city = os.getenv("WEATHER_CITY", "").strip()
 
     if not _weather_cache["data"]:
-        # First request since startup — fire background fetch, return empty
         asyncio.ensure_future(_refresh_weather(city))
         return ""
     elif stale:
-        # Cache expired — return stale data, refresh in background
         asyncio.ensure_future(_refresh_weather(city))
 
     return _weather_cache["data"]
 
 
 async def _refresh_weather(city: str) -> None:
-    """Background task: fetch weather and populate cache."""
     data = await _fetch_weather(city)
     if data:
         _weather_cache["data"] = data
@@ -161,14 +144,6 @@ async def _refresh_weather(city: str) -> None:
 
 
 def _time_period() -> str:
-    """Map current hour to a human-readable time-of-day label.
-
-    Uses local time (respects TZ env var in Docker, system timezone otherwise).
-    """
-    from datetime import timezone as tz, timedelta
-
-    # Python datetime.now() returns the system local time.
-    # Docker containers default to UTC — set TZ=Asia/Shanghai in docker-compose.
     hour = datetime.now().hour
     if 5 <= hour < 12:
         return "morning"
@@ -180,11 +155,7 @@ def _time_period() -> str:
 
 
 class EnvironmentProvider(ContextProvider):
-    """Injects current time and weather into the LLM context.
-
-    Weather is fetched from wttr.in with a 30-min cache and 1.5 s hard
-    timeout.  Any failure returns "" silently — the pipeline never waits.
-    """
+    """Injects current time and weather into the LLM context."""
 
     name = "environment"
 
@@ -222,77 +193,55 @@ class ToolSchemaProvider(ContextProvider):
 class EpisodicMemoryProvider(ContextProvider):
     """情节记忆上下文提供者 —— 注入与当前用户意图语义相似的历史交互。
 
-    v2.0 升级:
-    - 主路径使用 query_by_semantic() 做向量语义检索，替代旧版中英文关键词映射
-    - "放点轻松的爵士" 自动匹配到 calm/jazz 相关的历史交互，无需显式 mood 标签
-    - 保留时间引用检测（"上次那首"、"昨天听的"）作为补充路径
-    - 保留 _mood_keys 用于后续偏好分析（不参与检索逻辑）
-
-    设计理由:
-    - 旧版 _detect_moods() 依赖手动维护的 中→英 关键词表，覆盖不全且无法处理
-      同义词（如 "舒缓" vs "放松" vs "轻快" 都指向 calm）
-    - 语义检索天然解决同义词、近义词、跨语言映射问题
-    - 向量相似度排序比多次精确标签查询更高效（1 次 embedding + 1 次 query vs N 次 SQL）
+    v2.0: 主路径使用 query_by_semantic() 做向量语义检索。
+    v2.1 (RFC-007): _CN_MOOD_MAP 保留用于兼容，主 mood 词表来源统一为
+    profile_schema.VALID_MOODS。
     """
 
     name = "episodic_memory"
 
-    # 中英文心情关键词映射 —— 保留用于 mood_key 兼容性（profile 的 mood_bias 键查询）
-    # 不再用于检索，仅用于 get_context 中的辅助判断
+    # 中文→英文 mood 辅助映射（与 profile_schema.VALID_MOODS 对齐）
     _CN_MOOD_MAP: dict[str, str] = {
         "开心": "happy", "高兴": "happy", "快乐": "happy",
         "难过": "sad", "悲伤": "sad", "低落": "sad", "伤心": "sad", "emo": "sad",
         "专注": "focused", "工作": "focused", "学习": "focused", "coding": "focused",
         "平静": "calm", "安静": "calm", "放松": "calm", "relax": "calm", "chill": "calm",
         "下雨": "rainy", "雨天": "rainy", "雨": "rainy", "rain": "rainy",
-        "兴奋": "happy", "激动": "happy", "energetic": "happy",
+        "兴奋": "energetic", "激动": "energetic", "运动": "energetic", "跑步": "energetic",
+        "浪漫": "romantic", "约会": "romantic", "romantic": "romantic",
+        "困": "sleepy", "困了": "sleepy", "睡觉": "sleepy", "sleep": "sleepy",
+        "开车": "driving", "驾驶": "driving", "旅途": "driving", "drive": "driving",
+        "怀旧": "nostalgic", "回忆": "nostalgic", "老歌": "nostalgic",
     }
 
     def __init__(self, episodic: EpisodicMemory, mood_keys: list[str] | None = None) -> None:
         self._episodic = episodic
         self._mood_keys = [k.lower() for k in (mood_keys or []) if k.strip()]
 
-    # ---- 旧版 mood 检测方法保留（供外部兼容调用，不再用于检索主路径） ----
-
     def _detect_moods(self, user_input: str) -> list[str]:
-        """从用户输入检测心情标签（中英文关键词映射）。
-
-        注意：v2.0 后此方法仅保留用于兼容，检索主路径已升级为语义检索。
-        """
+        """从用户输入检测心情标签（中英文关键词映射）。"""
         lowered = user_input.lower()
         matched: set[str] = set()
 
-        # 直接英文匹配
         for mk in self._mood_keys:
             if mk in lowered:
                 matched.add(mk)
 
-        # 中文 → 英文映射
         for cn_word, en_mood in self._CN_MOOD_MAP.items():
             if cn_word in user_input and en_mood in self._mood_keys:
                 matched.add(en_mood)
 
         return list(matched)
 
-    # ---- 新版语义检索主路径 ----
-
     async def get_context(
         self, intent: Intent, user_input: str, metadata: dict[str, Any]
     ) -> str | None:
-        """注入与用户当前请求语义相似的历史交互上下文。
-
-        检索策略（两级）:
-        1. 主路径: 语义向量检索 —— 对 user_input 做 embedding，在 ChromaDB 中
-           按余弦相似度召回最相关的过往交互（限 5 条）
-        2. 补充路径: 时间引用检测 —— 如果用户提到 "上次"、"昨天" 等信号词，
-           额外注入最近 3 条交互（确保时间引用不被语义相似度淹没）
-        """
         if intent not in {Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND}:
             return None
 
         snapshots_by_id: dict[int, EpisodicSnapshot] = {}
 
-        # ---- 1) 主路径：语义向量检索 ----
+        # 1) Semantic vector search
         try:
             semantic_results = await self._episodic.query_by_semantic(
                 query_text=user_input,
@@ -301,10 +250,9 @@ class EpisodicMemoryProvider(ContextProvider):
             for snap in semantic_results:
                 snapshots_by_id[snap.id] = snap
         except Exception:
-            # 语义检索失败时静默降级 —— 不影响主流程
             pass
 
-        # ---- 2) 补充路径：时间引用检测 ----
+        # 2) Temporal reference signals
         temporal_signals = [
             "上次", "昨天", "之前", "上次那个", "上次那首",
             "last time", "yesterday", "before", "last song", "previous",
@@ -318,7 +266,6 @@ class EpisodicMemoryProvider(ContextProvider):
         if not snapshots_by_id:
             return None
 
-        # 按时间戳降序排列，保持上下文的时间连贯性
         sorted_snaps = sorted(
             snapshots_by_id.values(), key=lambda s: s.timestamp, reverse=True
         )
@@ -331,7 +278,6 @@ class EpisodicMemoryProvider(ContextProvider):
                     f" [played: {snap.played_song_artist or ''} - {snap.played_song_name}]"
                 )
             mood_info = f" (mood: {snap.mood_tag})" if snap.mood_tag else ""
-            # 如果有语义相似度分数，展示在末尾供 LLM 参考
             sim_info = ""
             if snap.similarity_score is not None:
                 sim_info = f" [similarity: {snap.similarity_score:.2f}]"
@@ -343,19 +289,18 @@ class EpisodicMemoryProvider(ContextProvider):
 
 
 # ============================================================
-# Assembler
+# Assembler (RFC-007: user-prompt only — system prompt is caller's concern)
 # ============================================================
 
 class ContextAssembler:
-    def __init__(
-        self,
-        providers: list[ContextProvider],
-        system_persona: str,
-        tool_constraints: str,
-    ) -> None:
+    """Assembles the user-prompt portion: context blocks + user input.
+
+    System-level prompts (identity, task, output schema) are NOT assembled here.
+    Callers obtain them from prompts.py and send them as role="system".
+    """
+
+    def __init__(self, providers: list[ContextProvider]) -> None:
         self.providers = providers
-        self.system_persona = system_persona
-        self.tool_constraints = tool_constraints
 
     async def assemble(
         self,
@@ -363,13 +308,19 @@ class ContextAssembler:
         intent: Intent,
         metadata: dict[str, Any] | None = None,
         resolved_song: dict[str, Any] | None = None,
+        tool_constraints: str = "",
     ) -> str:
-        """Build the full prompt by calling each provider and concatenating non-None results.
+        """Build the user-prompt: context blocks + optional extras + user input.
 
         Args:
-            resolved_song: (RFC-003) If set, injects the real song data so the LLM
-                           can craft its DJ script around the actual search result
-                           instead of hallucinating.
+            user_input: The user's raw message.
+            intent: Classified intent (gates which providers activate).
+            metadata: Frontend context (Currently Playing, raw_context, etc.).
+            resolved_song: (RFC-003) Real song data from Phase 1 pre-fetch.
+            tool_constraints: Optional tool usage rules block (used by single-pass).
+
+        Returns:
+            The user-prompt string to send as role="user".
         """
         meta = dict(metadata or {})
         context_blocks: list[str] = []
@@ -380,7 +331,6 @@ class ContextAssembler:
                 if block:
                     context_blocks.append(block)
             except Exception:
-                # A provider should not crash the entire assembly
                 continue
 
         context_text = "\n\n".join(context_blocks) if context_blocks else "- none"
@@ -389,13 +339,13 @@ class ContextAssembler:
         raw_lines = [f"- {key}: {_context_to_text(value)}" for key, value in raw_context.items()]
         raw_block = "\n".join(raw_lines) if raw_lines else ""
 
-        sections = [
-            self.system_persona,
-            self.tool_constraints,
-        ]
+        sections: list[str] = []
 
         if resolved_song:
             sections.append(format_resolved_song(resolved_song))
+
+        if tool_constraints:
+            sections.append(tool_constraints)
 
         if raw_block:
             sections.append(f"Additional Context:\n{raw_block}")

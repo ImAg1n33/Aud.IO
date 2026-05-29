@@ -36,8 +36,8 @@ TEST_SID = "test-session"
 class TestGenerateReply:
     @pytest.mark.asyncio
     async def test_injects_profile_for_music_intent(self, service, monkeypatch) -> None:
-        async def fake_call_llm(prompt: str, model: str | None = None):
-            assert "lofi" in prompt or "Preferred genres" in prompt
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
+            assert "lofi" in user_prompt or "Preferred genres" in user_prompt
             return {
                 "analysis": "ok",
                 "answer": "done",
@@ -59,8 +59,8 @@ class TestGenerateReply:
 
     @pytest.mark.asyncio
     async def test_chitchat_skips_profile(self, service, monkeypatch) -> None:
-        async def fake_call_llm(prompt: str, model: str | None = None):
-            assert "User Music Profile" not in prompt
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
+            assert "User Music Profile" not in user_prompt
             return {
                 "analysis": "ok",
                 "answer": "hello",
@@ -79,7 +79,7 @@ class TestGenerateReply:
 
     @pytest.mark.asyncio
     async def test_records_short_term_memory(self, service, monkeypatch) -> None:
-        async def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
             return {
                 "analysis": "ok",
                 "answer": "test answer",
@@ -102,7 +102,7 @@ class TestGenerateReply:
     async def test_retries_on_tool_error(self, service, monkeypatch) -> None:
         call_count = {"val": 0}
 
-        async def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
             call_count["val"] += 1
             return {
                 "analysis": "ok",
@@ -135,7 +135,7 @@ class TestGenerateReply:
 
     @pytest.mark.asyncio
     async def test_graceful_degradation_after_retries(self, service, monkeypatch) -> None:
-        async def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
             return {
                 "analysis": "ok",
                 "answer": "playing",
@@ -182,7 +182,7 @@ class TestSessionIsolation:
     @pytest.mark.asyncio
     async def test_conversation_history_isolated(self, service, monkeypatch) -> None:
         """Session A's conversation should not leak into Session B."""
-        async def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
             return {
                 "analysis": "ok", "answer": "ok",
                 "actions": [], "play_keyword": "",
@@ -213,7 +213,7 @@ class TestSessionIsolation:
     @pytest.mark.asyncio
     async def test_episodic_memory_filtered_by_session(self, service, monkeypatch) -> None:
         """Episodic snapshots store session_id and queries filter by it."""
-        async def fake_call_llm(prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
             return {
                 "analysis": "ok", "answer": "playing",
                 "actions": [], "play_keyword": "",
@@ -293,7 +293,7 @@ class TestTwoPassStreaming:
     @pytest.mark.asyncio
     async def test_two_pass_sends_status_searching_then_found(self, service, monkeypatch) -> None:
         """Phase 1 success → status:searching → status:found → music → token → text → done."""
-        async def fake_decision(prompt: str, model: str | None = None):
+        async def fake_decision(system_prompt: str, user_prompt: str, model: str | None = None):
             return {
                 "analysis": "ok", "answer": "", "actions": [],
                 "play_keyword": "Test Song",
@@ -306,7 +306,7 @@ class TestTwoPassStreaming:
         async def fake_mp3(song_id: str, level: str = "standard"):
             return "http://example.com/test.mp3"
 
-        async def fake_stream(prompt: str, **kw):
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
             yield "Hello"
             yield {
                 "analysis": "ok", "answer": "Hello!", "actions": [],
@@ -348,14 +348,14 @@ class TestTwoPassStreaming:
     @pytest.mark.asyncio
     async def test_two_pass_falls_back_on_phase1_failure(self, service, monkeypatch) -> None:
         """When Phase 1 returns None, the pipeline falls through to Single-Pass."""
-        async def fake_decision(prompt: str, model: str | None = None):
+        async def fake_decision(system_prompt: str, user_prompt: str, model: str | None = None):
             return {
                 "analysis": "ok", "answer": "", "actions": [],
-                "play_keyword": "",  # ← empty → Phase 1 fails
+                "play_keyword": "",
                 "provider": "test", "model": "test",
             }
 
-        async def fake_stream(prompt: str, **kw):
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
             yield {
                 "analysis": "ok", "answer": "fallback", "actions": [],
                 "play_keyword": "", "provider": "test", "model": "test",
@@ -381,7 +381,7 @@ class TestTwoPassStreaming:
     @pytest.mark.asyncio
     async def test_chitchat_uses_single_pass(self, service, monkeypatch) -> None:
         """CHITCHAT intent goes directly to Single-Pass (no Two-Pass overhead)."""
-        async def fake_stream(prompt: str, **kw):
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
             yield {
                 "analysis": "ok", "answer": "Hi there!", "actions": [],
                 "play_keyword": "", "provider": "test", "model": "test",

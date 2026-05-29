@@ -9,7 +9,7 @@ from backend.agent.context_assembler import (
     UserPreferenceProvider,
 )
 from backend.agent.intent_classifier import Intent
-from backend.agent.prompt_builder import ENHANCED_SYSTEM_PERSONA, ENHANCED_TOOL_CONSTRAINTS
+from backend.agent.prompts import TOOL_CONSTRAINTS
 from backend.memory.conversation_memory import ConversationMemory
 from backend.memory.episodic_memory import EpisodicMemory
 
@@ -46,8 +46,6 @@ def assembler(conversation_memory, stub_memory_manager, episodic_memory):
             ToolSchemaProvider(),
             EpisodicMemoryProvider(episodic_memory),
         ],
-        system_persona=ENHANCED_SYSTEM_PERSONA,
-        tool_constraints=ENHANCED_TOOL_CONSTRAINTS,
     )
 
 
@@ -185,11 +183,25 @@ class TestContextAssembler:
             user_input="播放一首爵士乐",
             intent=Intent.MUSIC_PLAY,
             metadata={"Currently Playing": "None"},
+            tool_constraints=TOOL_CONSTRAINTS,
         )
         assert "播放一首爵士乐" in prompt
-        assert ENHANCED_SYSTEM_PERSONA in prompt
-        assert ENHANCED_TOOL_CONSTRAINTS in prompt
+        assert TOOL_CONSTRAINTS in prompt
         assert "jazz" in prompt  # from preference
+
+    @pytest.mark.asyncio
+    async def test_system_persona_not_in_assembled_prompt(self, assembler) -> None:
+        """RFC-007: System persona is now sent as role='system' by callers,
+        not embedded in the assembled user-prompt."""
+        prompt = await assembler.assemble(
+            user_input="播放一首爵士乐",
+            intent=Intent.MUSIC_PLAY,
+            metadata={"Currently Playing": "None"},
+        )
+        assert "播放一首爵士乐" in prompt
+        # CORE_IDENTITY phrases should NOT appear in user-prompt
+        assert "indie music curator" not in prompt
+        assert "passenger seat" not in prompt
 
     @pytest.mark.asyncio
     async def test_chitchat_skips_preferences(self, assembler) -> None:

@@ -1,10 +1,8 @@
 """Agent orchestration: Perceive -> Decide -> Execute -> Record pipeline.
 
-v0.3 升级:
-- 引入 SessionManager (TTLCache) 实现多用户会话隔离
-- ConversationMemory 和 MemoryManager 按 session_id 独立
-- EpisodicMemory 共享实例，通过 session_id 过滤检索
-- ContextAssembler 每请求重建，携带当前会话的 provider 引用
+v0.4 (RFC-007): System-level prompts sent as role="system" via llm_client.
+ContextAssembler now only assembles the user-prompt portion.
+All prompt text lives in backend.agent.prompts.
 """
 
 import asyncio
@@ -26,11 +24,16 @@ from backend.agent.context_assembler import (
 from backend.agent.intent_classifier import Intent, IntentClassifier
 from backend.agent.llm_client import call_llm, stream_llm
 from backend.agent.memory_manager import MemoryManager
-from backend.agent.prompt_builder import (
-    ENHANCED_SYSTEM_PERSONA,
-    ENHANCED_TOOL_CONSTRAINTS,
-    PHASE2_STREAM_PERSONA,
-    build_phase1_decision_prompt,
+from backend.agent.prompts import (
+    GRACEFUL_FALLBACK_TEXT,
+    NON_STREAMING_SYSTEM,
+    PHASE1_DECISION_SYSTEM,
+    PHASE2_STREAM_SYSTEM,
+    SINGLE_PASS_STREAM_SYSTEM,
+    TOOL_CONSTRAINTS,
+    build_phase1_fail_user_prompt,
+    build_phase1_user_prompt,
+    build_retry_feedback,
 )
 from backend.agent.tool_executor import ToolExecutor
 from backend.memory.embedding import EmbeddingProvider
@@ -41,7 +44,7 @@ from backend.tools.netease_api import get_song_mp3_url, search_first_song
 
 class AssistantService:
     MAX_RETRIES = 2
-    SESSION_TTL = 86400   # 24 hours idle → evict
+    SESSION_TTL = 86400
     MAX_SESSIONS = 100
 
     def __init__(
@@ -51,14 +54,12 @@ class AssistantService:
     ) -> None:
         backend_root = Path(__file__).resolve().parents[1]
         self.session_manager = SessionManager(ttl=self.SESSION_TTL, maxsize=self.MAX_SESSIONS)
-        # EpisodicMemory is shared across sessions (filtered by session_id at query time)
         self.episodic_memory = EpisodicMemory(
             db_path=episodic_db_path or (backend_root / "memory" / "episodes.db"),
             embedding_provider=embedding_provider,
         )
         self.intent_classifier = IntentClassifier()
         self.tool_executor = ToolExecutor(max_retries=self.MAX_RETRIES)
-        # EpisodicMemoryProvider is reusable (references shared episodic_memory)
         self.episodic_provider = EpisodicMemoryProvider(self.episodic_memory)
 
     # ================================================================
@@ -66,20 +67,15 @@ class AssistantService:
     # ================================================================
 
     def _resolve_session(self, session_id: str | None) -> str:
-        """Normalise session_id — generate UUID if missing."""
         return session_id.strip() if session_id else str(uuid.uuid4())
 
     def _ensure_memory_manager(self, session_id: str) -> None:
-        """Lazily initialise MemoryManager for a session if not yet created."""
         ctx = self.session_manager.get_or_create(session_id)
         if ctx.memory_manager is None:
             ctx.memory_manager = MemoryManager(session_id=session_id)
 
-    def _build_context_assembler(
-        self,
-        session_id: str,
-    ) -> ContextAssembler:
-        """Full assembler for Single-Pass (CHITCHAT etc.) — all providers."""
+    def _build_context_assembler(self, session_id: str) -> ContextAssembler:
+        """Full assembler for Single-Pass (CHITCHAT, WEATHER, UNKNOWN)."""
         self._ensure_memory_manager(session_id)
         ctx = self.session_manager.get_or_create(session_id)
 
@@ -92,19 +88,13 @@ class AssistantService:
                 ToolSchemaProvider(),
                 self.episodic_provider,
             ],
-            system_persona=ENHANCED_SYSTEM_PERSONA,
-            tool_constraints=ENHANCED_TOOL_CONSTRAINTS,
         )
 
-    def _build_phase2_assembler(
-        self,
-        session_id: str,
-    ) -> ContextAssembler:
+    def _build_phase2_assembler(self, session_id: str) -> ContextAssembler:
         """Ultra-light assembler for Two-Pass Phase 2.
 
-        The song is already resolved — the LLM only needs the bare minimum:
-        conversation history (last 3 turns for continuity) and the song data
-        (injected via resolved_song parameter).  No profile, no stats, no tools.
+        Song is already resolved — only environment + short conversation
+        history needed for continuity.
         """
         self._ensure_memory_manager(session_id)
         ctx = self.session_manager.get_or_create(session_id)
@@ -114,12 +104,10 @@ class AssistantService:
                 EnvironmentProvider(),
                 ConversationHistoryProvider(ctx.short_term_memory),
             ],
-            system_persona=PHASE2_STREAM_PERSONA,
-            tool_constraints="",
         )
 
     # ================================================================
-    # Non-streaming pipeline
+    # Non-streaming pipeline (legacy)
     # ================================================================
 
     async def generate_reply(
@@ -135,20 +123,21 @@ class AssistantService:
         intent = await self.intent_classifier.classify_async(user_input)
         metadata: dict[str, Any] = dict(context or {})
 
-        # Refresh mood keys from per-session profile
         profile = ctx.memory_manager.get_profile()
         mood_bias = profile.get("mood_bias", {}) if isinstance(profile, dict) else {}
         self.episodic_provider._mood_keys = [k.lower() for k in mood_bias.keys() if k.strip()]
 
         assembler = self._build_context_assembler(sid)
-        prompt = await assembler.assemble(user_input, intent, metadata)
+        user_prompt = await assembler.assemble(
+            user_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
+        )
 
         # === DECIDE + EXECUTE (with retry loop) ===
         working_input = user_input
         retry_count = 0
 
         while True:
-            reply = await call_llm(prompt)
+            reply = await call_llm(NON_STREAMING_SYSTEM, user_prompt)
 
             actions = self._parse_actions_from_reply(reply)
             results = await self.tool_executor.execute_actions(actions)
@@ -163,9 +152,11 @@ class AssistantService:
                 break
 
             retry_count += 1
-            feedback = self._build_retry_feedback(final_reply, retry_contexts)
+            feedback = build_retry_feedback(final_reply, retry_contexts)
             working_input = f"{user_input}\n\n[System: {feedback}]"
-            prompt = await assembler.assemble(working_input, intent, metadata)
+            user_prompt = await assembler.assemble(
+                working_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
+            )
 
         # === RECORD ===
         if final_reply.get("analysis") != "Model call failed.":
@@ -186,7 +177,7 @@ class AssistantService:
                 )
             )
 
-        return final_reply, prompt
+        return final_reply, user_prompt
 
     # ================================================================
     # Streaming pipeline
@@ -198,10 +189,8 @@ class AssistantService:
     ) -> AsyncGenerator[str, None]:
         """Streaming variant — Two-Pass for music, Single-Pass for everything else.
 
-        RFC-003: When the intent is MUSIC_PLAY or MUSIC_RECOMMEND, the pipeline
-        first silently pre-fetches the real song via search_music + get_music_url,
-        then streams the DJ script with the actual result injected into context.
-        This eliminates the hallucination mismatch between copy and playback.
+        RFC-003: Two-Pass pipeline for MUSIC_PLAY.
+        RFC-007: System prompts sent as role="system".
         """
         sid = self._resolve_session(session_id)
         ctx = self.session_manager.get_or_create(sid)
@@ -216,18 +205,15 @@ class AssistantService:
         self.episodic_provider._mood_keys = [k.lower() for k in mood_bias.keys() if k.strip()]
 
         # ═══════════════════════════════════════════════════════════
-        # RFC-003 Two-Pass path — music intents only
+        # RFC-003 Two-Pass path — MUSIC_PLAY only
         # ═══════════════════════════════════════════════════════════
-        if intent in (Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND):
+        if intent == Intent.MUSIC_PLAY:
             # ── Phase 1: Silent pre-fetch ──
             yield self._sse("status", '{"phase":"searching"}')
             song_data = await self._phase1_prefetch(user_input, sid, metadata)
 
             if song_data is not None:
                 # ── Phase 2: Radio DJ timing ──
-                # 1. Music starts immediately (the "intro" plays)
-                # 2. LLM TTFT (~2s) is the natural instrumental gap
-                # 3. DJ script streams IN OVER the already-playing music
                 yield self._sse(
                     "status",
                     json.dumps({
@@ -237,18 +223,18 @@ class AssistantService:
                     }, ensure_ascii=False),
                 )
 
-                # Music first — like a radio DJ dropping the track before speaking
+                # Music first — like a DJ dropping the track before speaking
                 yield self._sse("music", json.dumps(song_data, ensure_ascii=False))
 
-                # Build prompt while music plays (this is fast, < 0.001s)
+                # Build user-prompt while music plays
                 assembler = self._build_phase2_assembler(sid)
-                prompt = await assembler.assemble(
+                user_prompt = await assembler.assemble(
                     user_input, intent, metadata, resolved_song=song_data,
                 )
 
                 # Stream DJ script over the already-playing music
                 reply = {}
-                async for chunk in stream_llm(prompt):
+                async for chunk in stream_llm(PHASE2_STREAM_SYSTEM, user_prompt):
                     if isinstance(chunk, str):
                         yield self._sse("token", chunk)
                     elif isinstance(chunk, dict):
@@ -277,19 +263,32 @@ class AssistantService:
                 )
                 yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
                 return
-            # Phase 1 failed — fall through to Single-Pass below
+
+            # Phase 1 failed — DJ breaks the news naturally
+            yield self._sse("status", '{"phase":"not_found"}')
+
+            fail_user_prompt = build_phase1_fail_user_prompt(user_input)
+            reply = {}
+            async for chunk in stream_llm(SINGLE_PASS_STREAM_SYSTEM, fail_user_prompt):
+                if isinstance(chunk, str):
+                    yield self._sse("token", chunk)
+                elif isinstance(chunk, dict):
+                    reply = chunk
+            yield self._sse("text", reply.get("answer", ""))
+            yield self._sse("done", json.dumps(reply, ensure_ascii=False))
+            return
 
         # ═══════════════════════════════════════════════════════════
-        # Single-Pass path — chitchat, weather, unknown, or Two-Pass fallback
+        # Single-Pass path — CHITCHAT, WEATHER, UNKNOWN, MUSIC_RECOMMEND
         # ═══════════════════════════════════════════════════════════
         assembler = self._build_context_assembler(sid)
-        prompt = await assembler.assemble(user_input, intent, metadata)
+        user_prompt = await assembler.assemble(
+            user_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
+        )
 
-        # === DECIDE (streaming with retry) ===
         reply: dict[str, Any] = {}
-        stream_interrupted: bool = False
 
-        async for chunk in stream_llm(prompt):
+        async for chunk in stream_llm(SINGLE_PASS_STREAM_SYSTEM, user_prompt):
             if isinstance(chunk, str):
                 yield self._sse("token", chunk)
             elif isinstance(chunk, dict):
@@ -297,14 +296,8 @@ class AssistantService:
                 if reply.get("analysis") == "Model call failed.":
                     stream_interrupted = reply.get("stream_interrupted", False)
                     error_msg = reply.get("answer", "Request failed")
-                    if stream_interrupted:
-                        yield self._sse("error", error_msg)
-                    else:
-                        yield self._sse("error", error_msg)
+                    yield self._sse("error", error_msg)
                     return
-
-        if stream_interrupted or reply.get("analysis") == "Model call failed.":
-            return
 
         yield self._sse("text", reply.get("answer", ""))
 
@@ -343,24 +336,25 @@ class AssistantService:
     async def _phase1_prefetch(
         self, user_input: str, sid: str, metadata: dict[str, Any]
     ) -> dict[str, Any] | None:
-        """Phase 1: silently extract play_keyword → search → resolve mp3_url.
+        """Phase 1: silently extract play_keyword -> search -> resolve mp3_url.
 
-        Returns song_data dict on success, None on any failure (search miss,
-        copyright block, network error).  On None the caller falls back to
-        Single-Pass which has its own retry / graceful-degradation logic.
-
-        Uses a minimal prompt — no full context assembly — because Phase 1
-        only needs to extract a search keyword, not write a DJ script.
+        Uses PHASE1_DECISION_SYSTEM (role="system") with minimal context
+        (role="user") to disambiguate song-title vs emotion.
         """
-        # 1a: Quick decision with minimal prompt
+        ctx = self.session_manager.get_or_create(sid)
         currently_playing = (metadata or {}).get("Currently Playing", "")
-        decision_prompt = build_phase1_decision_prompt(
+        last_turn = ctx.short_term_memory.get_last_user_message() or ""
+        last_reply = ctx.short_term_memory.get_last_assistant_reply() or ""
+
+        decision_user_prompt = build_phase1_user_prompt(
             user_input,
             currently_playing=currently_playing if currently_playing != "None" else "",
+            last_turn=last_turn,
+            last_reply=last_reply,
         )
 
         try:
-            decision = await call_llm(decision_prompt)
+            decision = await call_llm(PHASE1_DECISION_SYSTEM, decision_user_prompt)
         except Exception:
             return None
 
@@ -368,7 +362,6 @@ class AssistantService:
         if not play_kw:
             return None
 
-        # 1b: Search + resolve MP3 URL — one shot, no degraded retry
         try:
             search_result = await search_first_song(play_kw)
             mp3_url = await get_song_mp3_url(search_result["id"])
@@ -402,7 +395,7 @@ class AssistantService:
         )
 
     # ================================================================
-    # Helpers (unchanged)
+    # Helpers
     # ================================================================
 
     @staticmethod
@@ -484,30 +477,13 @@ class AssistantService:
         return contexts
 
     @staticmethod
-    def _build_retry_feedback(reply: dict[str, Any], retry_contexts: list[str]) -> str:
-        music = reply.get("music")
-        song_name = ""
-        if isinstance(music, dict):
-            song_name = music.get("name", "") or music.get("requested_keyword", "")
-
-        target = song_name or "the requested song"
-        feedback = " ".join(retry_contexts)
-        if target and target not in feedback:
-            feedback = f"The song '{target}' could not be played. {feedback}"
-        return feedback
-
-    @staticmethod
     def _build_graceful_fallback(reply: dict[str, Any]) -> dict[str, Any]:
         degraded = dict(reply)
         degraded.pop("music", None)
         degraded["play_keyword"] = ""
 
-        fallback_text = (
-            "Sorry, I picked several songs but all were blocked by copyright restrictions. "
-            "Please try a different style or specify a different artist."
-        )
-        degraded["answer"] = fallback_text
-        degraded["say"] = fallback_text
+        degraded["answer"] = GRACEFUL_FALLBACK_TEXT
+        degraded["say"] = GRACEFUL_FALLBACK_TEXT
 
         actions = degraded.get("actions")
         if isinstance(actions, list):

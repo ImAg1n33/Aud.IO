@@ -56,7 +56,7 @@ function handleSSE(event, data, store, player) {
         if (status.phase === 'searching') {
           store.responseText = '> Searching...'
           store.responseColor = 'var(--text-disabled)'
-        } else if (status.phase === 'found') {
+        } else if (status.phase === 'found' || status.phase === 'not_found') {
           // Reset for the incoming stream — wipe the "Searching..." prefix
           resetTyping()
           store.responseText = '> '

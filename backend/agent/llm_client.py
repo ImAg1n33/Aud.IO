@@ -1,6 +1,7 @@
 """LLM client — unified httpx async backend for both streaming and non-streaming calls.
 
-v0.3: 全量迁移 urllib → httpx，消除双重 HTTP 客户端混用。
+v0.4 (RFC-007): System prompt sent as role="system" (not concatenated into user message).
+Callers pass system_prompt and user_prompt separately.
 """
 
 import json
@@ -129,14 +130,27 @@ def _normalize_response(payload: dict[str, Any], provider: str, model: str) -> d
     }
 
 
-async def call_llm(prompt: str, model: str | None = None) -> dict[str, Any]:
-    """Call OpenAI-compatible API and return strict JSON.
+# ============================================================
+# Non-streaming call
+# ============================================================
+
+async def call_llm(
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Call OpenAI-compatible API with system role and return structured JSON.
+
+    Args:
+        system_prompt: System-level instructions (identity, task, output format).
+                       Sent as role="system" for higher instruction adherence.
+        user_prompt: Context blocks + user input. Sent as role="user".
 
     Response schema:
     - analysis: brief reasoning summary
     - answer: final user-facing answer
     - actions: next steps list
-    - play_keyword: required only when user intent is to play music
+    - play_keyword: "Artist SongTitle" or empty string
     """
     config = _get_llm_config(model_override=model)
 
@@ -151,17 +165,8 @@ async def call_llm(prompt: str, model: str | None = None) -> dict[str, Any]:
         }
 
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Aud.IO's reasoning core. Think based on user input and return "
-                "strict JSON only with keys: analysis (string), answer (string), "
-                "actions (string array), play_keyword (string). "
-                "If user asks to play/search a song, play_keyword must be a concrete "
-                "music search phrase. Otherwise set play_keyword to an empty string."
-            ),
-        },
-        {"role": "user", "content": prompt},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
     ]
 
     try:
@@ -179,40 +184,26 @@ async def call_llm(prompt: str, model: str | None = None) -> dict[str, Any]:
 
 
 # ============================================================
-# Streaming support (SSE, for real-time typewriter UX + future TTS)
+# Streaming call (SSE, for real-time typewriter UX)
 # ============================================================
 
-_STREAM_SYSTEM_PROMPT = """You are Aud.IO's streaming DJ core.
-
-Output in two parts, separated by the marker ---JSON--- on its own line:
-
-Part 1: Your natural spoken answer to the user. Be warm, concise, DJ-like.
-Write this as if you're speaking on air. Use the same language the user uses.
-
-Part 2: A single JSON line with these keys:
-- analysis: brief reasoning
-- actions: list of tool calls, each a JSON object like {"tool": "search_music", "keyword": "Artist Song"}
-- play_keyword: the music search phrase (Artist SongTitle format), or empty string
-
-Example output:
-Hi there! The weather is perfect for some chill jazz. Here is Miles Davis for you.
----JSON---
-{"analysis": "user wants jazz", "actions": [{"tool": "search_music", "keyword": "Miles Davis So What"}], "play_keyword": "Miles Davis So What"}
-
-IMPORTANT: The JSON part must be valid JSON on a single line after the ---JSON--- marker."""
-
-
 async def stream_llm(
-    prompt: str,
+    system_prompt: str,
+    user_prompt: str,
     model: str | None = None,
     max_retries: int = 2,
     timeout: float = 30.0,
 ) -> AsyncGenerator[str | dict[str, Any], None]:
-    """Stream LLM response with retry logic for connection failures.
+    """Stream LLM response with system role and retry logic.
+
+    Args:
+        system_prompt: System-level instructions (identity, task, output format).
+                       Sent as role="system".
+        user_prompt: Context blocks + user input. Sent as role="user".
 
     Yields:
         str  — answer text tokens (typewriter stream)
-        dict — final structured reply (stream_interrupted=True marks interrupted stream)
+        dict — final structured reply (stream_interrupted=True marks interruption)
     """
     config = _get_llm_config(model_override=model)
 
@@ -227,19 +218,7 @@ async def stream_llm(
         }
         return
 
-    full_prompt = f"{_STREAM_SYSTEM_PROMPT}\n\n{prompt}"
-
     endpoint = f"{config['base_url'].rstrip('/')}/chat/completions"
-    body = {
-        "model": config["model"],
-        "temperature": 0.2,
-        "stream": True,
-        "max_tokens": 400,  # DJ script + JSON ≈ 150-300 tokens; cap prevents rambling
-        "messages": [
-            {"role": "user", "content": full_prompt},
-        ],
-    }
-
     MARKER = "---JSON---"
 
     for attempt in range(max_retries + 1):
@@ -255,7 +234,16 @@ async def stream_llm(
                 async with client.stream(
                     "POST",
                     endpoint,
-                    json=body,
+                    json={
+                        "model": config["model"],
+                        "temperature": 0.2,
+                        "stream": True,
+                        "max_tokens": 400,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                    },
                     headers={
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {config['api_key']}",
@@ -321,7 +309,7 @@ async def stream_llm(
 
             text_answer = full_content.split("---JSON---")[0].strip()
             normalized = _normalize_response(parsed, config["provider"], config["model"])
-            normalized["answer"] = text_answer
+            normalized["answer"] = text_answer if text_answer else parsed.get("answer", "")
             normalized["stream_interrupted"] = False
             yield normalized
             return

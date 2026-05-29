@@ -1,4 +1,8 @@
-"""Hybrid intent classifier — LLM primary with keyword fallback (RFC-004)."""
+"""Hybrid intent classifier — LLM primary with keyword fallback (RFC-004).
+
+RFC-007: Hard play signals short-circuit to MUSIC_PLAY before LLM/keyword paths,
+eliminating song-title-vs-emotion ambiguity for phrases like "来一首嫉妒".
+"""
 
 import asyncio
 import json
@@ -8,11 +12,11 @@ from typing import ClassVar
 
 import httpx
 
-from backend.agent.prompt_builder import INTENT_CLASSIFIER_SYSTEM_PROMPT
+from backend.agent.prompts import INTENT_CLASSIFIER_SYSTEM
 
-# ── LLM config (reuses same credentials, different timeout) ──
+# ── LLM config ──
 
-_CLASSIFY_TIMEOUT = 1.5  # seconds — hard deadline, fallback kicks in after this
+_CLASSIFY_TIMEOUT = 1.5
 _CLASSIFY_MODEL = os.getenv("LLM_MODEL", "").strip() or "deepseek-v4-flash"
 _CLASSIFY_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
 _CLASSIFY_API_KEY = (
@@ -30,19 +34,22 @@ class Intent(str, Enum):
 
 
 class IntentClassifier:
+    # ── RFC-007: Hard play signals — 100% confidence, skip LLM ──────────
+    HARD_PLAY_SIGNALS: ClassVar[list[str]] = [
+        "来一首", "来首", "点一首", "点首", "放一首", "放首",
+        "播一首", "播首", "换一首", "换首", "下一首", "切歌",
+        "再来一首", "来点",
+    ]
+
     MUSIC_PLAY_KEYWORDS: ClassVar[list[str]] = [
-        # English
-        "play", "put on", "start", "listen to", "播放",
-        # Chinese
+        "play", "put on", "start", "listen to",
         "放", "来一首", "来首", "播", "点一首", "点首", "放一首", "放首",
         "换一首", "换首", "下一首", "切歌", "再来一首", "来点",
     ]
 
     MUSIC_RECOMMEND_KEYWORDS: ClassVar[list[str]] = [
-        # English
         "recommend", "suggest", "what should i listen", "what do you recommend",
         "any recommendations", "推荐", "有什么好听的", "适合",
-        # Chinese mood-based
         "心情", "累了", "开心", "难过", "低落", "兴奋", "焦虑", "放松",
         "想听", "给我推荐", "建议",
     ]
@@ -59,10 +66,12 @@ class IntentClassifier:
     async def classify_async(self, user_input: str) -> Intent:
         """Classify via LLM with keyword fallback.
 
-        The LLM path is given 1.5 s to respond.  Any failure — timeout,
-        network error, bad JSON, unknown label — falls through to the
-        deterministic keyword classifier (zero cost, < 1 ms).
+        RFC-007: Hard play signals short-circuit to MUSIC_PLAY immediately.
         """
+        # RFC-007: Hard play signals — user clearly wants playback, no LLM needed
+        if self._has_hard_play_signal(user_input):
+            return Intent.MUSIC_PLAY
+
         try:
             intent = await asyncio.wait_for(
                 self._classify_via_llm(user_input),
@@ -86,7 +95,7 @@ class IntentClassifier:
             "max_tokens": 10,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": INTENT_CLASSIFIER_SYSTEM_PROMPT},
+                {"role": "system", "content": INTENT_CLASSIFIER_SYSTEM},
                 {"role": "user", "content": user_input},
             ],
         }
@@ -108,53 +117,61 @@ class IntentClassifier:
         return Intent(parsed["intent"])
 
     # ═══════════════════════════════════════════════════════════════
-    # Deterministic keyword path (unchanged, < 1 ms, always available)
+    # Deterministic keyword path
     # ═══════════════════════════════════════════════════════════════
 
     def classify(self, user_input: str, conversation_history: list | None = None) -> Intent:
-        """Classify user input into an intent category.
-
-        Priority: MUSIC_PLAY > WEATHER > MUSIC_RECOMMEND > CHITCHAT > UNKNOWN
-        """
         lowered = user_input.strip().lower()
         if not lowered:
             return Intent.UNKNOWN
 
-        # Music play — most actionable.
-        # But if it's a question about what to play, it's a recommendation.
+        # RFC-007: Hard play signals checked first (also covers classify_async path)
+        if self._has_hard_play_signal(user_input):
+            return Intent.MUSIC_PLAY
+
+        # Music play — most actionable
         if self._matches_any(lowered, self.MUSIC_PLAY_KEYWORDS):
             if self._is_music_question(lowered):
                 return Intent.MUSIC_RECOMMEND
             return Intent.MUSIC_PLAY
 
-        # Music recommend (before weather — "rainy day music" is about music, not weather)
+        # Music recommend
         if self._matches_any(lowered, self.MUSIC_RECOMMEND_KEYWORDS):
             return Intent.MUSIC_RECOMMEND
 
-        # Check for question-form music queries
         if self._is_music_question(lowered):
             return Intent.MUSIC_RECOMMEND
 
-        # Weather — only when weather is the primary topic
+        # Weather
         if self._matches_any(lowered, self.WEATHER_KEYWORDS):
             return Intent.WEATHER
 
-        # If contains music-related but no specific action, it's a recommendation
+        # Music-adjacent (genre words without action verbs)
         if self._is_music_adjacent(lowered):
             return Intent.MUSIC_RECOMMEND
 
-        # Check if it's a chitchat
         if self._is_chitchat(lowered):
             return Intent.CHITCHAT
 
         return Intent.UNKNOWN
 
+    # ── RFC-007: Hard play signal detector ──────────────────────────────
+
+    @classmethod
+    def _has_hard_play_signal(cls, user_input: str) -> bool:
+        """Check for unambiguous playback-request signals.
+
+        Phrases like "来一首X" / "播放X" / "放首X" are treated as
+        MUSIC_PLAY regardless of whether X looks like an emotion word.
+        """
+        return any(sig in user_input for sig in cls.HARD_PLAY_SIGNALS)
+
+    # ── Intent gating helpers ──────────────────────────────────────────
+
     def should_include_preferences(self, intent: Intent) -> bool:
-        """Whether to inject user preference data for this intent."""
         return intent in {Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND}
 
     def should_activate_tool_categories(self, intent: Intent) -> list[str]:
-        """Which tool categories to enable for this intent."""
         mapping: dict[Intent, list[str]] = {
             Intent.MUSIC_PLAY: ["music"],
             Intent.MUSIC_RECOMMEND: ["music"],
@@ -163,6 +180,8 @@ class IntentClassifier:
             Intent.UNKNOWN: ["music", "weather", "tts"],
         }
         return mapping.get(intent, [])
+
+    # ── Static helpers ─────────────────────────────────────────────────
 
     @staticmethod
     def _matches_any(text: str, keywords: list[str]) -> bool:

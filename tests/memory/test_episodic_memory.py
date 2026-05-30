@@ -1,6 +1,8 @@
+import sqlite3
+
 import pytest
 
-from backend.memory.episodic_memory import EpisodicMemory
+from backend.memory.episodic_memory import EpisodicMemory, EpisodicSnapshot, _utc_now_iso
 
 
 @pytest.fixture
@@ -123,3 +125,164 @@ class TestPreferenceStats:
         assert result is not None
         assert "jazz" in result
         assert "2x" in result
+
+
+class TestMigrationFramework:
+    """Verify the versioned migration framework (RFC-007 v0.3)."""
+
+    def test_schema_version_table_exists(self, episodic) -> None:
+        """schema_version table is created during init."""
+        db_path = str(episodic.db_path)
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
+            ).fetchone()
+        assert row is not None
+
+    def test_current_schema_version_is_2(self, episodic) -> None:
+        """Both v1 and v2 migrations are applied."""
+        assert episodic._get_schema_version() == 2
+
+    def test_decay_columns_exist(self, episodic) -> None:
+        """Migration v2 added the decay columns."""
+        db_path = str(episodic.db_path)
+        with sqlite3.connect(db_path) as conn:
+            cols = conn.execute("PRAGMA table_info(episodes)").fetchall()
+            col_names = {c[1] for c in cols}
+        for expected in ("importance_score", "access_count", "last_accessed"):
+            assert expected in col_names, f"Missing column: {expected}"
+
+    def test_session_id_column_exists(self, episodic) -> None:
+        """Migration v1 added session_id."""
+        db_path = str(episodic.db_path)
+        with sqlite3.connect(db_path) as conn:
+            cols = conn.execute("PRAGMA table_info(episodes)").fetchall()
+            col_names = {c[1] for c in cols}
+        assert "session_id" in col_names
+
+    def test_migration_idempotent(self, episodic) -> None:
+        """Re-running init on an already-migrated DB doesn't break."""
+        episodic._run_migrations()
+        assert episodic._get_schema_version() == 2
+
+
+class TestMemoryDecay:
+    """Verify importance auto-detection, record_access, and decay scoring."""
+
+    @pytest.mark.asyncio
+    async def test_song_play_gets_high_importance(self, episodic) -> None:
+        """Playing a song → importance 0.8."""
+        sid = await episodic.store_snapshot(
+            "play jazz",
+            played_song={"name": "So What", "artist": "Miles Davis"},
+        )
+        recent = await episodic.query_recent()
+        snap = recent[0]
+        assert snap.id == sid
+        assert snap.importance_score == 0.8
+
+    @pytest.mark.asyncio
+    async def test_chitchat_gets_low_importance(self, episodic) -> None:
+        """Bare chitchat (no song, no mood) → importance 0.3."""
+        await episodic.store_snapshot("你好")
+        recent = await episodic.query_recent()
+        assert recent[0].importance_score == 0.3
+
+    @pytest.mark.asyncio
+    async def test_mood_signal_gets_medium_importance(self, episodic) -> None:
+        """Input with mood signal → importance 0.6 (recommendation-level)."""
+        await episodic.store_snapshot("心情低落想听点治愈的歌")
+        recent = await episodic.query_recent()
+        assert recent[0].importance_score == 0.6
+
+    def test_decay_formula_bounds(self) -> None:
+        """Decayed score stays in [0.0, 1.0] range."""
+        now = _utc_now_iso()
+        score = EpisodicMemory._compute_decayed_score(
+            semantic_sim=0.8,
+            importance=0.5,
+            access_count=0,
+            last_accessed=None,
+            created_at=now,
+            now_iso=now,
+        )
+        assert 0.0 <= score <= 1.0
+
+    def test_decay_fresh_memory_ranks_higher(self) -> None:
+        """A fresh memory scores higher than an old one, all else equal."""
+        now = _utc_now_iso()
+        # "Old" memory: created 30 days ago, never accessed
+        old_score = EpisodicMemory._compute_decayed_score(
+            semantic_sim=0.8, importance=0.5, access_count=0,
+            last_accessed=None,
+            created_at="2026-04-01T00:00:00Z",
+            now_iso=now,
+        )
+        # "Recent" memory: just created
+        new_score = EpisodicMemory._compute_decayed_score(
+            semantic_sim=0.8, importance=0.5, access_count=0,
+            last_accessed=None,
+            created_at=now,
+            now_iso=now,
+        )
+        assert new_score > old_score, f"new={new_score:.3f} <= old={old_score:.3f}"
+
+    def test_frequently_accessed_memory_ranks_higher(self) -> None:
+        """Access count boosts score."""
+        now = _utc_now_iso()
+        low = EpisodicMemory._compute_decayed_score(
+            semantic_sim=0.8, importance=0.5, access_count=0,
+            last_accessed=None, created_at=now, now_iso=now,
+        )
+        high = EpisodicMemory._compute_decayed_score(
+            semantic_sim=0.8, importance=0.5, access_count=10,
+            last_accessed=None, created_at=now, now_iso=now,
+        )
+        assert high > low, f"high={high:.3f} <= low={low:.3f}"
+
+    @pytest.mark.asyncio
+    async def test_record_access_increments(self, episodic) -> None:
+        """record_access() bumps access_count and sets last_accessed."""
+        sid = await episodic.store_snapshot("play jazz")
+        await episodic.record_access([sid])
+
+        db_path = str(episodic.db_path)
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT access_count, last_accessed FROM episodes WHERE id = ?",
+                (sid,),
+            ).fetchone()
+        assert row[0] == 1
+        assert row[1] is not None
+
+    @pytest.mark.asyncio
+    async def test_importance_auto_detection_override(self, episodic) -> None:
+        """Explicit importance_score overrides auto-detection."""
+        await episodic.store_snapshot(
+            "hello", importance_score=0.95,
+        )
+        recent = await episodic.query_recent()
+        assert recent[0].importance_score == 0.95
+
+    @pytest.mark.asyncio
+    async def test_query_by_semantic_uses_decay_reranking(self, episodic) -> None:
+        """query_by_semantic loads decay fields and records access."""
+        await episodic.store_snapshot(
+            "play some chill jazz", assistant_reply="Playing jazz.",
+            played_song={"name": "So What", "artist": "Miles Davis"},
+        )
+        await episodic.store_snapshot(
+            "recommend something calm", assistant_reply="Try this.",
+        )
+
+        results = await episodic.query_by_semantic("chill jazz", limit=2)
+        assert len(results) >= 1
+
+        # Verify access was recorded for returned snapshots
+        db_path = str(episodic.db_path)
+        with sqlite3.connect(db_path) as conn:
+            for snap in results:
+                row = conn.execute(
+                    "SELECT access_count FROM episodes WHERE id = ?", (snap.id,),
+                ).fetchone()
+                assert row is not None and row[0] >= 1

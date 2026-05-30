@@ -15,6 +15,7 @@ ChromaDB 存储模型:
 
 import asyncio
 import logging
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,6 +50,11 @@ class EpisodicSnapshot:
 
     # 语义相似度分数（仅在 vector 查询时填充，SQLite 查询为 None）
     similarity_score: float | None = None
+
+    # RFC-007: 记忆评分与衰减字段（v0.3）
+    importance_score: float = 0.5        # 0.0-1.0，由交互深度决定（播放>推荐>闲聊）
+    access_count: int = 0               # 累计检索命中次数
+    last_accessed: str | None = None    # 最近一次被检索的 ISO 时间戳
 
 
 # ================================================================
@@ -273,10 +279,14 @@ class EpisodicMemory:
     # 初始化
     # ================================================================
 
+    # Current schema version — increment when adding new columns/tables
+    _SCHEMA_VERSION = 2
+
     def _init_sqlite(self) -> None:
-        """创建 SQLite 表及索引（与旧版 schema 完全一致）。"""
+        """Create SQLite tables and run pending migrations."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(self.db_path)) as conn:
+            # Base schema (v0)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS episodes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,21 +309,104 @@ class EpisodicMemory:
                 CREATE INDEX IF NOT EXISTS idx_episodes_tags
                 ON episodes(mood_tag, weather_tag, time_of_day)
             """)
+            # Migration tracking table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                )
+            """)
             conn.commit()
-        # v0.3 migration: add session_id column for multi-user isolation
-        self._migrate_sqlite_session_id()
 
-    def _migrate_sqlite_session_id(self) -> None:
-        """Add session_id column if it doesn't exist (v0.3 multi-user isolation)."""
+        # Run pending migrations
+        self._run_migrations()
+
+    # ================================================================
+    # Versioned migration framework
+    # ================================================================
+
+    def _get_schema_version(self) -> int:
+        """Return the highest applied migration version, or 0 if none."""
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                row = conn.execute(
+                    "SELECT MAX(version) FROM schema_version"
+                ).fetchone()
+                return row[0] if row and row[0] is not None else 0
+        except sqlite3.OperationalError:
+            return 0
+
+    def _set_schema_version(self, version: int) -> None:
+        """Record a migration as applied."""
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (version, _utc_now_iso()),
+            )
+            conn.commit()
+        logger.info("Migration v%d applied successfully.", version)
+
+    def _run_migrations(self) -> None:
+        """Execute all pending migrations in version order."""
+        current = self._get_schema_version()
+        migrations = [
+            (1, self._migrate_v1_session_id),
+            (2, self._migrate_v2_decay_fields),
+        ]
+        for version, migrate_fn in migrations:
+            if version > current:
+                migrate_fn()
+                self._set_schema_version(version)
+
+    def _migrate_v1_session_id(self) -> None:
+        """v1: Add session_id column for multi-user isolation."""
         try:
             with sqlite3.connect(str(self.db_path)) as conn:
                 conn.execute(
-                    "ALTER TABLE episodes ADD COLUMN session_id TEXT NOT NULL DEFAULT 'default'"
+                    "ALTER TABLE episodes ADD COLUMN session_id "
+                    "TEXT NOT NULL DEFAULT 'default'"
                 )
                 conn.commit()
-            logger.info("SQLite migration: added session_id column to episodes")
         except sqlite3.OperationalError:
-            pass  # Column already exists
+            pass  # Column already exists (pre-migration-framework installs)
+
+        # Backfill ChromaDB entries without session_id
+        try:
+            results = self._collection.get(include=["metadatas"])
+            if results["ids"]:
+                ids_to_update: list[str] = []
+                metadatas_to_update: list[dict[str, str]] = []
+                for i, cid in enumerate(results["ids"]):
+                    meta = results["metadatas"][i] if i < len(results["metadatas"]) else {}
+                    if _Meta.SESSION_ID not in meta or not meta[_Meta.SESSION_ID]:
+                        meta[_Meta.SESSION_ID] = "default"
+                        ids_to_update.append(cid)
+                        metadatas_to_update.append(meta)
+                if ids_to_update:
+                    self._collection.update(
+                        ids=ids_to_update, metadatas=metadatas_to_update,
+                    )
+                    logger.info(
+                        "ChromaDB backfill: session_id for %d entries", len(ids_to_update),
+                    )
+        except Exception as exc:
+            logger.warning("ChromaDB session_id backfill skipped: %s", exc)
+
+    def _migrate_v2_decay_fields(self) -> None:
+        """v2: Add importance_score, access_count, last_accessed for memory decay."""
+        with sqlite3.connect(str(self.db_path)) as conn:
+            for col, col_type in [
+                ("importance_score", "REAL NOT NULL DEFAULT 0.5"),
+                ("access_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_accessed", "TEXT"),  # nullable — NULL until first access
+            ]:
+                try:
+                    conn.execute(
+                        f"ALTER TABLE episodes ADD COLUMN {col} {col_type}"
+                    )
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+            conn.commit()
 
     def _init_chroma(self) -> None:
         """初始化 ChromaDB PersistentClient 及 episodes collection。
@@ -334,11 +427,9 @@ class EpisodicMemory:
         self._chroma_client = chromadb.PersistentClient(path=self._chroma_path)
 
         # 获取或创建 collection
-        # 注意：不传 embedding_function 参数 —— 我们在外部手动计算 embedding，
-        # 这样 ChromeLocalEmbedding 和 APIEmbedding 走统一的代码路径
         self._collection = self._chroma_client.get_or_create_collection(
             name="episodes",
-            metadata={"hnsw:space": "cosine"},  # 余弦相似度，适合语义检索
+            metadata={"hnsw:space": "cosine"},
         )
 
         logger.info(
@@ -347,32 +438,6 @@ class EpisodicMemory:
             self._chroma_path,
             self._collection.count(),
         )
-
-        # v0.3 migration: backfill session_id for existing entries
-        self._migrate_chroma_session_id()
-
-    def _migrate_chroma_session_id(self) -> None:
-        """Backfill existing ChromaDB entries without session_id."""
-        try:
-            results = self._collection.get(include=["metadatas"])
-            if not results["ids"]:
-                return
-            ids_to_update: list[str] = []
-            metadatas_to_update: list[dict[str, str]] = []
-            for i, cid in enumerate(results["ids"]):
-                meta = results["metadatas"][i] if i < len(results["metadatas"]) else {}
-                if _Meta.SESSION_ID not in meta or not meta[_Meta.SESSION_ID]:
-                    meta[_Meta.SESSION_ID] = "default"
-                    ids_to_update.append(cid)
-                    metadatas_to_update.append(meta)
-            if ids_to_update:
-                self._collection.update(ids=ids_to_update, metadatas=metadatas_to_update)
-                logger.info(
-                    "ChromaDB migration: backfilled session_id for %d entries",
-                    len(ids_to_update),
-                )
-        except Exception as exc:
-            logger.warning("ChromaDB session_id migration skipped: %s", exc)
 
     # ================================================================
     # 写入路径 —— Phase 1 双写（ChromaDB + SQLite）
@@ -387,6 +452,7 @@ class EpisodicMemory:
         weather_tag: str | None = None,
         genre_tag: str | None = None,
         session_id: str = "default",
+        importance_score: float | None = None,
     ) -> int:
         """持久化一次对话交互快照（双写 ChromaDB + SQLite）。
 
@@ -398,15 +464,11 @@ class EpisodicMemory:
             weather_tag: 天气标签（预留）
             genre_tag: 歌曲流派标签
             session_id: 会话标识符（用于多用户隔离）
+            importance_score: 记忆重要性（None = 自动推断:
+                歌曲播放→0.8, 推荐→0.6, 闲聊→0.3）
 
         Returns:
             新插入记录的 ID（与 SQLite episodes.id 一致）
-
-        写入流程:
-            1. 自动检测 mood（如果调用方未提供）
-            2. 先写 SQLite（获取自增 ID）
-            3. 用相同 ID 写 ChromaDB（含向量嵌入）
-            4. 如果 ChromaDB 写入失败，记录错误但不阻塞（SQLite 已写成功）
         """
         # --- 提取歌曲信息 ---
         song_name = None
@@ -418,6 +480,15 @@ class EpisodicMemory:
         # --- 自动检测心情标签 ---
         if mood_tag is None:
             mood_tag = MoodDetector.detect(user_input)
+
+        # --- 自动推断重要性评分 ---
+        if importance_score is None:
+            if played_song:
+                importance_score = 0.8  # 播放了歌曲 — 高价值记忆
+            elif mood_tag:
+                importance_score = 0.6  # 有情绪信号的推荐
+            else:
+                importance_score = 0.3  # 普通闲聊
 
         time_of_day = _time_of_day()
         timestamp = _utc_now_iso()
@@ -435,6 +506,7 @@ class EpisodicMemory:
             time_of_day,
             genre_tag,
             session_id,
+            importance_score,
         )
 
         # --- 2) ChromaDB 写入（携带向量嵌入） ---
@@ -450,18 +522,13 @@ class EpisodicMemory:
             time_of_day=time_of_day,
             genre_tag=genre_tag,
             session_id=session_id,
+            importance_score=importance_score,
         )
 
-        if mood_tag:
-            logger.debug(
-                "情节记忆已存储: id=%d, mood=%s, time=%s, input=%.60s...",
-                row_id, mood_tag, time_of_day, user_input,
-            )
-        else:
-            logger.debug(
-                "情节记忆已存储: id=%d, mood=(未检测到), time=%s, input=%.60s...",
-                row_id, time_of_day, user_input,
-            )
+        logger.debug(
+            "情节记忆已存储: id=%d, mood=%s, importance=%.1f, time=%s, input=%.60s...",
+            row_id, mood_tag or "(none)", importance_score, time_of_day, user_input,
+        )
 
         return row_id
 
@@ -477,14 +544,16 @@ class EpisodicMemory:
         time_of_day: str,
         genre_tag: str | None,
         session_id: str = "default",
+        importance_score: float = 0.5,
     ) -> int:
         """同步 SQLite 插入，返回自增 ID。"""
         with sqlite3.connect(str(self.db_path)) as conn:
             cursor = conn.execute(
                 """INSERT INTO episodes
                    (timestamp, user_input, assistant_reply, played_song_name, played_song_artist,
-                    mood_tag, weather_tag, time_of_day, genre_tag, session_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    mood_tag, weather_tag, time_of_day, genre_tag, session_id,
+                    importance_score, access_count, last_accessed)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)""",
                 (
                     timestamp,
                     user_input,
@@ -496,6 +565,7 @@ class EpisodicMemory:
                     time_of_day,
                     genre_tag,
                     session_id,
+                    importance_score,
                 ),
             )
             conn.commit()
@@ -514,16 +584,15 @@ class EpisodicMemory:
         time_of_day: str,
         genre_tag: str | None,
         session_id: str = "default",
+        importance_score: float = 0.5,
     ) -> None:
         """向 ChromaDB collection 写入或更新一条记录（携带向量）。"""
         try:
-            # 计算 user_input 的向量嵌入
             embeddings = await self._embed.embed([user_input])
         except Exception as exc:
             logger.error("向量嵌入计算失败，跳过 ChromaDB 写入 (id=%d): %s", row_id, exc)
             return
 
-        # 构建 metadata —— 注意限制文本长度避免 ChromaDB 元数据过大
         metadata: dict[str, str] = {
             _Meta.TIMESTAMP: timestamp,
             _Meta.USER_INPUT: user_input[:_Meta.MAX_TEXT_LEN],
@@ -535,6 +604,7 @@ class EpisodicMemory:
             _Meta.TIME_OF_DAY: time_of_day,
             _Meta.GENRE_TAG: genre_tag or "",
             _Meta.SESSION_ID: session_id,
+            "importance": str(importance_score),
         }
 
         try:
@@ -548,6 +618,101 @@ class EpisodicMemory:
         except Exception as exc:
             logger.error("ChromaDB 写入失败 (id=%d): %s", row_id, exc)
             # 不重新抛出 —— SQLite 已经写成功，ChromaDB 失败不影响主流程
+
+    # ================================================================
+    # 记忆衰减评分引擎 (RFC-007 — v0.3)
+    # ================================================================
+
+    @staticmethod
+    def _compute_decayed_score(
+        semantic_sim: float,
+        importance: float,
+        access_count: int,
+        last_accessed: str | None,
+        created_at: str,
+        now_iso: str,
+    ) -> float:
+        """Compute a weighted retrieval score combining semantic similarity
+        with memory decay factors.
+
+        Weights (tuned for a personal music DJ — recent & important > old):
+          semantic_sim * 0.50  — vector similarity (ChromaDB cosine)
+          importance    * 0.20  — how valuable this memory is
+          freshness     * 0.20  — Ebbinghaus decay since last access
+          access_bonus  * 0.10  — frequently accessed memories stay "hot"
+
+        Returns a score in [0.0, 1.0].
+        """
+        # Importance: direct
+        imp = max(0.0, min(1.0, importance))
+
+        # Freshness: Ebbinghaus-inspired decay since last access (or creation)
+        ref_ts = last_accessed or created_at
+        try:
+            ref_dt = datetime.fromisoformat(ref_ts.replace("Z", "+00:00"))
+            now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+            hours_elapsed = (now_dt - ref_dt).total_seconds() / 3600.0
+        except (ValueError, TypeError):
+            hours_elapsed = 24.0  # Fallback: treat as 1 day old
+
+        # Half-life of ~7 days (168 hours) for un-reinforced memories
+        freshness = math.exp(-hours_elapsed / 168.0)
+
+        # Access bonus: log-scale, saturates around 10 accesses
+        access_bonus = math.log(access_count + 1) / math.log(11)
+
+        return (
+            semantic_sim * 0.50
+            + imp * 0.20
+            + freshness * 0.20
+            + access_bonus * 0.10
+        )
+
+    def _load_decay_fields_batch(
+        self, snapshot_ids: list[int]
+    ) -> dict[int, tuple[float, int, str | None]]:
+        """Efficiently load decay fields for a batch of snapshot IDs from SQLite.
+
+        Returns: {id: (importance_score, access_count, last_accessed), ...}
+        """
+        if not snapshot_ids:
+            return {}
+        with sqlite3.connect(str(self.db_path)) as conn:
+            placeholders = ",".join("?" for _ in snapshot_ids)
+            rows = conn.execute(
+                f"SELECT id, importance_score, access_count, last_accessed "
+                f"FROM episodes WHERE id IN ({placeholders})",
+                snapshot_ids,
+            ).fetchall()
+        return {
+            row[0]: (
+                float(row[1]) if row[1] is not None else 0.5,
+                int(row[2]) if row[2] is not None else 0,
+                str(row[3]) if row[3] is not None else None,
+            )
+            for row in rows
+        }
+
+    async def record_access(self, snapshot_ids: list[int]) -> None:
+        """Increment access_count and update last_accessed for retrieved snapshots.
+
+        Called after each retrieval so that future decay scores reflect
+        the access pattern.
+        """
+        if not snapshot_ids:
+            return
+        now_iso = _utc_now_iso()
+
+        def _update() -> None:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.executemany(
+                    "UPDATE episodes SET access_count = access_count + 1, "
+                    "last_accessed = ? WHERE id = ?",
+                    [(now_iso, sid) for sid in snapshot_ids],
+                )
+                conn.commit()
+
+        await asyncio.to_thread(_update)
 
     # ================================================================
     # 读取路径 —— 语义检索（新增能力）
@@ -590,8 +755,8 @@ class EpisodicMemory:
             limit: 返回记录数上限
 
         Returns:
-            按语义相似度降序排列的 EpisodicSnapshot 列表，
-            每个 snapshot 的 similarity_score 字段包含余弦距离（1.0 = 完全匹配）
+            按衰减加权分数降序排列的 EpisodicSnapshot 列表，
+            每个 snapshot 的 similarity_score 字段包含原始余弦相似度。
         """
         # --- 构建 ChromaDB where 过滤条件 ---
         where_filter = self._build_chroma_where(
@@ -608,11 +773,12 @@ class EpisodicMemory:
             logger.error("查询向量嵌入失败，fallback 到 SQLite 关键词检索: %s", exc)
             return await self._fallback_keyword_query(query_text, limit, session_id)
 
-        # --- ChromaDB 向量检索 ---
+        # --- ChromaDB 向量检索（拉取更多候选供衰减重排） ---
+        fetch_count = max(limit * 3, 15)
         try:
             results = self._collection.query(
                 query_embeddings=query_embeddings,
-                n_results=limit,
+                n_results=fetch_count,
                 where=where_filter if where_filter else None,
                 include=["metadatas", "documents", "distances"],
             )
@@ -620,8 +786,41 @@ class EpisodicMemory:
             logger.error("ChromaDB 查询失败，fallback 到 SQLite: %s", exc)
             return await self._fallback_keyword_query(query_text, limit, session_id)
 
-        # --- 将 ChromaDB 结果映射为 EpisodicSnapshot 列表 ---
-        return self._chroma_results_to_snapshots(results)
+        # --- 映射候选集 ---
+        candidates = self._chroma_results_to_snapshots(results)
+
+        # --- 加载衰减字段并重排序 ---
+        if candidates:
+            ids = [s.id for s in candidates]
+            decay_data = self._load_decay_fields_batch(ids)
+            now_iso = _utc_now_iso()
+
+            for snap in candidates:
+                imp, acc, last_acc = decay_data.get(
+                    snap.id, (snap.importance_score, snap.access_count, snap.last_accessed),
+                )
+                snap.importance_score = imp
+                snap.access_count = acc
+                snap.last_accessed = last_acc
+                raw_sim = snap.similarity_score or 0.5
+                snap.similarity_score = raw_sim  # keep original cosine
+                # Attach decayed score as a transient attribute for sorting
+                snap._decayed_score = self._compute_decayed_score(  # type: ignore[attr-defined]
+                    semantic_sim=raw_sim,
+                    importance=imp,
+                    access_count=acc,
+                    last_accessed=last_acc,
+                    created_at=snap.timestamp,
+                    now_iso=now_iso,
+                )
+
+            candidates.sort(key=lambda s: getattr(s, "_decayed_score", 0.0), reverse=True)
+
+        # --- 截取最终结果 & 记录访问 ---
+        final = candidates[:limit]
+        if final:
+            await self.record_access([s.id for s in final])
+        return final
 
     # ================================================================
     # 读取路径 —— 标签精确检索（ChromaDB metadata 过滤，替代旧 SQL WHERE）
@@ -1059,7 +1258,13 @@ class EpisodicMemory:
 # ================================================================
 
 def _row_to_snapshot(row: tuple[Any, ...]) -> EpisodicSnapshot:
-    """将 SQLite 行元组映射为 EpisodicSnapshot（与旧版完全兼容）。"""
+    """将 SQLite 行元组映射为 EpisodicSnapshot。"""
+    # Decay fields are at indices 11-13 (added by migration v2).
+    # Handle pre-migration rows gracefully (fewer columns).
+    importance = float(row[11]) if len(row) > 11 and row[11] is not None else 0.5
+    access_count = int(row[12]) if len(row) > 12 and row[12] is not None else 0
+    last_accessed = str(row[13]) if len(row) > 13 and row[13] is not None else None
+
     return EpisodicSnapshot(
         id=row[0],
         timestamp=row[1],
@@ -1072,4 +1277,7 @@ def _row_to_snapshot(row: tuple[Any, ...]) -> EpisodicSnapshot:
         time_of_day=row[8],
         genre_tag=row[9],
         similarity_score=None,
+        importance_score=importance,
+        access_count=access_count,
+        last_accessed=last_accessed,
     )

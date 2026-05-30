@@ -15,10 +15,10 @@ ChromaDB 存储模型:
 
 import asyncio
 import logging
-import sqlite3
 from pathlib import Path
 from typing import Any
 
+from backend.memory._migration import MigrationManager
 from backend.memory._sqlite_repo import SqliteRepository
 from backend.memory.decay import compute_decayed_score
 from backend.memory.embedding import (
@@ -93,144 +93,20 @@ class EpisodicMemory:
         # --- Embedding provider ---
         self._embed = embedding_provider or create_embedding_provider()
 
-        # --- SQLite 初始化（向后兼容） ---
-        self._init_sqlite()
-
-        # --- ChromaDB 初始化（主存储） ---
+        # --- ChromaDB 初始化（必须在 MigrationManager 之前，因为 v1 迁移需要 _collection） ---
         self._init_chroma()
 
-    # ================================================================
-    # 初始化
-    # ================================================================
+        # --- Migration (needs both db_path and _collection) ---
+        self._migration = MigrationManager(self.db_path, self._collection)
+        self._migration.initialize_tables()
 
-    # Current schema version — increment when adding new columns/tables
-    _SCHEMA_VERSION = 2
-
-    def _init_sqlite(self) -> None:
-        """Create SQLite tables and run pending migrations."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path)) as conn:
-            # Base schema (v0)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS episodes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    user_input TEXT NOT NULL,
-                    assistant_reply TEXT NOT NULL DEFAULT '',
-                    played_song_name TEXT,
-                    played_song_artist TEXT,
-                    mood_tag TEXT,
-                    weather_tag TEXT,
-                    time_of_day TEXT NOT NULL DEFAULT 'unknown',
-                    genre_tag TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_episodes_timestamp
-                ON episodes(timestamp DESC)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_episodes_tags
-                ON episodes(mood_tag, weather_tag, time_of_day)
-            """)
-            # Migration tracking table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS schema_version (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                )
-            """)
-            conn.commit()
-
-        # Run pending migrations
-        self._run_migrations()
-
-    # ================================================================
-    # Versioned migration framework
-    # ================================================================
+    # ── Migration delegation (backward-compat for tests) ───────────────
 
     def _get_schema_version(self) -> int:
-        """Return the highest applied migration version, or 0 if none."""
-        try:
-            with sqlite3.connect(str(self.db_path)) as conn:
-                row = conn.execute(
-                    "SELECT MAX(version) FROM schema_version"
-                ).fetchone()
-                return row[0] if row and row[0] is not None else 0
-        except sqlite3.OperationalError:
-            return 0
-
-    def _set_schema_version(self, version: int) -> None:
-        """Record a migration as applied."""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute(
-                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (version, _utc_now_iso()),
-            )
-            conn.commit()
-        logger.info("Migration v%d applied successfully.", version)
+        return self._migration.get_version()
 
     def _run_migrations(self) -> None:
-        """Execute all pending migrations in version order."""
-        current = self._get_schema_version()
-        migrations = [
-            (1, self._migrate_v1_session_id),
-            (2, self._migrate_v2_decay_fields),
-        ]
-        for version, migrate_fn in migrations:
-            if version > current:
-                migrate_fn()
-                self._set_schema_version(version)
-
-    def _migrate_v1_session_id(self) -> None:
-        """v1: Add session_id column for multi-user isolation."""
-        try:
-            with sqlite3.connect(str(self.db_path)) as conn:
-                conn.execute(
-                    "ALTER TABLE episodes ADD COLUMN session_id "
-                    "TEXT NOT NULL DEFAULT 'default'"
-                )
-                conn.commit()
-        except sqlite3.OperationalError:
-            pass  # Column already exists (pre-migration-framework installs)
-
-        # Backfill ChromaDB entries without session_id
-        try:
-            results = self._collection.get(include=["metadatas"])
-            if results["ids"]:
-                ids_to_update: list[str] = []
-                metadatas_to_update: list[dict[str, str]] = []
-                for i, cid in enumerate(results["ids"]):
-                    meta = results["metadatas"][i] if i < len(results["metadatas"]) else {}
-                    if _Meta.SESSION_ID not in meta or not meta[_Meta.SESSION_ID]:
-                        meta[_Meta.SESSION_ID] = "default"
-                        ids_to_update.append(cid)
-                        metadatas_to_update.append(meta)
-                if ids_to_update:
-                    self._collection.update(
-                        ids=ids_to_update, metadatas=metadatas_to_update,
-                    )
-                    logger.info(
-                        "ChromaDB backfill: session_id for %d entries", len(ids_to_update),
-                    )
-        except Exception as exc:
-            logger.warning("ChromaDB session_id backfill skipped: %s", exc)
-
-    def _migrate_v2_decay_fields(self) -> None:
-        """v2: Add importance_score, access_count, last_accessed for memory decay."""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            for col, col_type in [
-                ("importance_score", "REAL NOT NULL DEFAULT 0.5"),
-                ("access_count", "INTEGER NOT NULL DEFAULT 0"),
-                ("last_accessed", "TEXT"),  # nullable — NULL until first access
-            ]:
-                try:
-                    conn.execute(
-                        f"ALTER TABLE episodes ADD COLUMN {col} {col_type}"
-                    )
-                except sqlite3.OperationalError:
-                    pass  # Column already exists
-            conn.commit()
+        self._migration.run_pending()
 
     def _init_chroma(self) -> None:
         """初始化 ChromaDB PersistentClient 及 episodes collection。

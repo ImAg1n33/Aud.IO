@@ -18,6 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from backend.memory._chroma_repo import ChromaRepository
 from backend.memory._migration import MigrationManager
 from backend.memory._sqlite_repo import SqliteRepository
 from backend.memory.decay import compute_decayed_score
@@ -88,56 +89,26 @@ class EpisodicMemory:
             db_path = backend_root / "memory" / "episodes.db"
         self.db_path = Path(db_path)  # 确保是 Path 对象，兼容调用方传 str
         self._sqlite = SqliteRepository(self.db_path)
-        self._chroma_path = str(self.db_path.parent / "chroma_episodes")
 
         # --- Embedding provider ---
         self._embed = embedding_provider or create_embedding_provider()
 
-        # --- ChromaDB 初始化（必须在 MigrationManager 之前，因为 v1 迁移需要 _collection） ---
-        self._init_chroma()
+        # --- ChromaDB (必须在 MigrationManager 之前，v1 迁移需要 collection) ---
+        chroma_path = str(self.db_path.parent / "chroma_episodes")
+        self._chroma = ChromaRepository(chroma_path, self._embed)
+        self._chroma.initialize()
 
         # --- Migration (needs both db_path and _collection) ---
-        self._migration = MigrationManager(self.db_path, self._collection)
+        self._migration = MigrationManager(self.db_path, self._chroma.collection)
         self._migration.initialize_tables()
 
-    # ── Migration delegation (backward-compat for tests) ───────────────
+    # ── Backward-compat delegation for tests ───────────────────────────
 
     def _get_schema_version(self) -> int:
         return self._migration.get_version()
 
     def _run_migrations(self) -> None:
         self._migration.run_pending()
-
-    def _init_chroma(self) -> None:
-        """初始化 ChromaDB PersistentClient 及 episodes collection。
-
-        ChromaDB 的 PersistentClient 使用 SQLite3 作为自己的元数据存储，
-        数据文件位于 self._chroma_path 目录下，与我们的 episodes.db 独立。
-        """
-        try:
-            import chromadb
-        except ImportError:
-            logger.error(
-                "ChromaDB 未安装，无法启用向量检索。"
-                "请执行: pip install chromadb"
-            )
-            raise
-
-        # PersistentClient —— 数据持久化到磁盘，进程内运行，无需额外服务
-        self._chroma_client = chromadb.PersistentClient(path=self._chroma_path)
-
-        # 获取或创建 collection
-        self._collection = self._chroma_client.get_or_create_collection(
-            name="episodes",
-            metadata={"hnsw:space": "cosine"},
-        )
-
-        logger.info(
-            "ChromaDB 初始化完成: collection='episodes', "
-            "path=%s, count=%d",
-            self._chroma_path,
-            self._collection.count(),
-        )
 
     # ================================================================
     # 写入路径 —— Phase 1 双写（ChromaDB + SQLite）
@@ -210,18 +181,12 @@ class EpisodicMemory:
         )
 
         # --- 2) ChromaDB 写入（携带向量嵌入） ---
-        await self._upsert_chroma(
-            row_id=row_id,
-            user_input=user_input,
-            timestamp=timestamp,
-            assistant_reply=assistant_reply,
-            song_name=song_name,
-            song_artist=song_artist,
-            mood_tag=mood_tag,
-            weather_tag=weather_tag,
-            time_of_day=time_of_day,
-            genre_tag=genre_tag,
-            session_id=session_id,
+        await self._chroma.upsert(
+            row_id=row_id, user_input=user_input, timestamp=timestamp,
+            assistant_reply=assistant_reply, song_name=song_name,
+            song_artist=song_artist, mood_tag=mood_tag,
+            weather_tag=weather_tag, time_of_day=time_of_day,
+            genre_tag=genre_tag, session_id=session_id,
             importance_score=importance_score,
         )
 
@@ -232,56 +197,8 @@ class EpisodicMemory:
 
         return row_id
 
-    async def _upsert_chroma(
-        self,
-        row_id: int,
-        user_input: str,
-        timestamp: str,
-        assistant_reply: str,
-        song_name: str | None,
-        song_artist: str | None,
-        mood_tag: str | None,
-        weather_tag: str | None,
-        time_of_day: str,
-        genre_tag: str | None,
-        session_id: str = "default",
-        importance_score: float = 0.5,
-    ) -> None:
-        """向 ChromaDB collection 写入或更新一条记录（携带向量）。"""
-        try:
-            embeddings = await self._embed.embed([user_input])
-        except Exception as exc:
-            logger.error("向量嵌入计算失败，跳过 ChromaDB 写入 (id=%d): %s", row_id, exc)
-            return
-
-        metadata: dict[str, str] = {
-            _Meta.TIMESTAMP: timestamp,
-            _Meta.USER_INPUT: user_input[:_Meta.MAX_TEXT_LEN],
-            _Meta.ASSISTANT_REPLY: assistant_reply[:_Meta.MAX_TEXT_LEN],
-            _Meta.SONG_NAME: song_name or "",
-            _Meta.SONG_ARTIST: song_artist or "",
-            _Meta.MOOD_TAG: mood_tag or "",
-            _Meta.WEATHER_TAG: weather_tag or "",
-            _Meta.TIME_OF_DAY: time_of_day,
-            _Meta.GENRE_TAG: genre_tag or "",
-            _Meta.SESSION_ID: session_id,
-            "importance": str(importance_score),
-        }
-
-        try:
-            # upsert: 如果 ID 已存在则更新（幂等），否则插入
-            self._collection.upsert(
-                ids=[str(row_id)],
-                embeddings=embeddings,
-                documents=[user_input],
-                metadatas=[metadata],
-            )
-        except Exception as exc:
-            logger.error("ChromaDB 写入失败 (id=%d): %s", row_id, exc)
-            # 不重新抛出 —— SQLite 已经写成功，ChromaDB 失败不影响主流程
-
     # ================================================================
-    # 记忆衰减评分引擎 (RFC-007 — v0.3)
+    # 记忆衰减 — DB 操作（委托到 SqliteRepository）
     # ================================================================
 
     def _load_decay_fields_batch(
@@ -337,35 +254,20 @@ class EpisodicMemory:
             每个 snapshot 的 similarity_score 字段包含原始余弦相似度。
         """
         # --- 构建 ChromaDB where 过滤条件 ---
-        where_filter = self._build_chroma_where(
-            mood_tag=mood_tag,
-            time_of_day=time_of_day,
-            genre_tag=genre_tag,
-            session_id=session_id,
+        where_filter = ChromaRepository.build_where(
+            mood_tag=mood_tag, time_of_day=time_of_day,
+            genre_tag=genre_tag, session_id=session_id,
         )
-
-        # --- 计算查询文本的向量嵌入 ---
-        try:
-            query_embeddings = await self._embed.embed([query_text])
-        except Exception as exc:
-            logger.error("查询向量嵌入失败，fallback 到 SQLite 关键词检索: %s", exc)
-            return await self._fallback_keyword_query(query_text, limit, session_id)
 
         # --- ChromaDB 向量检索（拉取更多候选供衰减重排） ---
         fetch_count = max(limit * 3, 15)
         try:
-            results = self._collection.query(
-                query_embeddings=query_embeddings,
-                n_results=fetch_count,
-                where=where_filter if where_filter else None,
-                include=["metadatas", "documents", "distances"],
+            candidates = await self._chroma.semantic_search(
+                query_text=query_text, where=where_filter, limit=fetch_count,
             )
         except Exception as exc:
             logger.error("ChromaDB 查询失败，fallback 到 SQLite: %s", exc)
             return await self._fallback_keyword_query(query_text, limit, session_id)
-
-        # --- 映射候选集 ---
-        candidates = self._chroma_results_to_snapshots(results)
 
         # --- 加载衰减字段并重排序 ---
         if candidates:
@@ -423,39 +325,19 @@ class EpisodicMemory:
         if not any([mood_tag, weather_tag, time_of_day, genre_tag, session_id]):
             return await self.query_recent(limit=limit, session_id=session_id)
 
-        # --- 构建 ChromaDB where 过滤 ---
-        where_filter = self._build_chroma_where(
-            mood_tag=mood_tag,
-            weather_tag=weather_tag,
-            time_of_day=time_of_day,
-            genre_tag=genre_tag,
+        where_filter = ChromaRepository.build_where(
+            mood_tag=mood_tag, weather_tag=weather_tag,
+            time_of_day=time_of_day, genre_tag=genre_tag,
             session_id=session_id,
         )
 
         try:
-            # ChromaDB get 支持 where 过滤 + 排序
-            results = self._collection.get(
-                where=where_filter,
-                limit=limit,
-                include=["metadatas", "documents"],
-            )
+            return self._chroma.tags_search(where=where_filter, limit=limit)
         except Exception as exc:
             logger.error("ChromaDB 标签查询失败，fallback 到 SQLite: %s", exc)
             return await self._fallback_tags_query(
                 mood_tag, weather_tag, time_of_day, genre_tag, limit, session_id,
             )
-
-        if not results["ids"]:
-            return []
-
-        # 按 timestamp 降序排列（ChromaDB get 不保证顺序）
-        snapshots = self._metadata_list_to_snapshots(
-            results["ids"],
-            results["metadatas"],
-            results.get("documents"),
-        )
-        snapshots.sort(key=lambda s: s.timestamp, reverse=True)
-        return snapshots[:limit]
 
     # ================================================================
     # 读取路径 —— 保留的旧版查询方法
@@ -498,139 +380,6 @@ class EpisodicMemory:
 
     def format_stats_for_prompt(self, stats: dict[str, Any]) -> str | None:
         return self._sqlite.format_stats_for_prompt(stats)
-
-    # ================================================================
-    # 工具函数（同步 ChromaDB 查询 → snapshot 映射）
-    # ================================================================
-
-    def _build_chroma_where(
-        self,
-        *,
-        mood_tag: str | None = None,
-        weather_tag: str | None = None,
-        time_of_day: str | None = None,
-        genre_tag: str | None = None,
-        session_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        """将标签过滤参数转换为 ChromaDB metadata where 过滤条件。
-
-        ChromaDB where 语法:
-        - 单条件: {"field": "value"}
-        - AND 组合: {"$and": [{"field1": "v1"}, {"field2": "v2"}]}
-        - 空字符串视为"未设置"，需要额外排除
-        """
-        conditions: list[dict[str, Any]] = []
-
-        if mood_tag and mood_tag.strip():
-            conditions.append({_Meta.MOOD_TAG: mood_tag.strip()})
-        if weather_tag and weather_tag.strip():
-            conditions.append({_Meta.WEATHER_TAG: weather_tag.strip()})
-        if time_of_day and time_of_day.strip():
-            conditions.append({_Meta.TIME_OF_DAY: time_of_day.strip()})
-        if genre_tag and genre_tag.strip():
-            conditions.append({_Meta.GENRE_TAG: genre_tag.strip()})
-        if session_id and session_id.strip():
-            conditions.append({_Meta.SESSION_ID: session_id.strip()})
-
-        if not conditions:
-            return None
-        if len(conditions) == 1:
-            return conditions[0]
-        return {"$and": conditions}
-
-    def _chroma_results_to_snapshots(
-        self, results: dict[str, Any]
-    ) -> list[EpisodicSnapshot]:
-        """将 ChromaDB query() 返回结果映射为 EpisodicSnapshot 列表。
-
-        ChromaDB query 返回格式:
-        {
-            "ids": [["id1", "id2", ...]],
-            "metadatas": [[{...}, {...}, ...]],
-            "documents": [["doc1", "doc2", ...]],
-            "distances": [[0.12, 0.34, ...]],
-        }
-        每个字段都是嵌套列表（外层对应多个 query embedding，内层对应结果列表）。
-        """
-        ids_list = results.get("ids", [[]])
-        metas_list = results.get("metadatas", [[]])
-        docs_list = results.get("documents", [[]])
-        dists_list = results.get("distances", [[]])
-
-        # 取第一个 query embedding 的结果列表
-        ids = ids_list[0] if ids_list else []
-        metas = metas_list[0] if metas_list else []
-        docs = docs_list[0] if docs_list else []
-        dists = dists_list[0] if dists_list else []
-
-        snapshots: list[EpisodicSnapshot] = []
-        for i, chroma_id in enumerate(ids):
-            meta = metas[i] if i < len(metas) else {}
-            doc = docs[i] if i < len(docs) else ""
-            distance = dists[i] if i < len(dists) else None
-
-            # 将余弦距离转换为 0-1 相似度分数（ChromaDB cosine distance → similarity）
-            # cosine distance ∈ [0, 2]，cosine similarity ∈ [-1, 1]
-            # similarity ≈ 1 - distance/2（映射到 [0, 1]）
-            similarity = None
-            if distance is not None:
-                similarity = round(max(0.0, 1.0 - distance / 2.0), 4)
-
-            try:
-                row_id = int(chroma_id)
-            except (ValueError, TypeError):
-                row_id = 0
-
-            snapshots.append(EpisodicSnapshot(
-                id=row_id,
-                timestamp=meta.get(_Meta.TIMESTAMP, ""),
-                user_input=meta.get(_Meta.USER_INPUT, doc),
-                assistant_reply=meta.get(_Meta.ASSISTANT_REPLY, ""),
-                played_song_name=meta.get(_Meta.SONG_NAME) or None,
-                played_song_artist=meta.get(_Meta.SONG_ARTIST) or None,
-                mood_tag=meta.get(_Meta.MOOD_TAG) or None,
-                weather_tag=meta.get(_Meta.WEATHER_TAG) or None,
-                time_of_day=meta.get(_Meta.TIME_OF_DAY, "unknown"),
-                genre_tag=meta.get(_Meta.GENRE_TAG) or None,
-                similarity_score=similarity,
-            ))
-
-        return snapshots
-
-    def _metadata_list_to_snapshots(
-        self,
-        ids: list[str],
-        metadatas: list[dict[str, Any]],
-        documents: list[str] | None,
-    ) -> list[EpisodicSnapshot]:
-        """将 ChromaDB get() 的平铺结果映射为 EpisodicSnapshot 列表。"""
-        snapshots: list[EpisodicSnapshot] = []
-        docs = documents or []
-
-        for i, chroma_id in enumerate(ids):
-            meta = metadatas[i] if i < len(metadatas) else {}
-            doc = docs[i] if i < len(docs) else ""
-
-            try:
-                row_id = int(chroma_id)
-            except (ValueError, TypeError):
-                row_id = 0
-
-            snapshots.append(EpisodicSnapshot(
-                id=row_id,
-                timestamp=meta.get(_Meta.TIMESTAMP, ""),
-                user_input=meta.get(_Meta.USER_INPUT, doc),
-                assistant_reply=meta.get(_Meta.ASSISTANT_REPLY, ""),
-                played_song_name=meta.get(_Meta.SONG_NAME) or None,
-                played_song_artist=meta.get(_Meta.SONG_ARTIST) or None,
-                mood_tag=meta.get(_Meta.MOOD_TAG) or None,
-                weather_tag=meta.get(_Meta.WEATHER_TAG) or None,
-                time_of_day=meta.get(_Meta.TIME_OF_DAY, "unknown"),
-                genre_tag=meta.get(_Meta.GENRE_TAG) or None,
-                similarity_score=None,
-            ))
-
-        return snapshots
 
     # ================================================================
     # Fallback 查询（ChromaDB 不可用时降级到 SQLite）

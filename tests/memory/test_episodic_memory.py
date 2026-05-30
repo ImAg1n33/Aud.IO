@@ -2,7 +2,9 @@ import sqlite3
 
 import pytest
 
-from backend.memory.episodic_memory import EpisodicMemory, EpisodicSnapshot, _utc_now_iso
+from backend.memory.episodic_memory import EpisodicMemory
+from backend.memory.models import EpisodicSnapshot, _utc_now_iso
+from backend.memory.decay import compute_decayed_score
 
 
 @pytest.fixture
@@ -198,7 +200,7 @@ class TestMemoryDecay:
     def test_decay_formula_bounds(self) -> None:
         """Decayed score stays in [0.0, 1.0] range."""
         now = _utc_now_iso()
-        score = EpisodicMemory._compute_decayed_score(
+        score = compute_decayed_score(
             semantic_sim=0.8,
             importance=0.5,
             access_count=0,
@@ -212,14 +214,14 @@ class TestMemoryDecay:
         """A fresh memory scores higher than an old one, all else equal."""
         now = _utc_now_iso()
         # "Old" memory: created 30 days ago, never accessed
-        old_score = EpisodicMemory._compute_decayed_score(
+        old_score = compute_decayed_score(
             semantic_sim=0.8, importance=0.5, access_count=0,
             last_accessed=None,
             created_at="2026-04-01T00:00:00Z",
             now_iso=now,
         )
         # "Recent" memory: just created
-        new_score = EpisodicMemory._compute_decayed_score(
+        new_score = compute_decayed_score(
             semantic_sim=0.8, importance=0.5, access_count=0,
             last_accessed=None,
             created_at=now,
@@ -230,11 +232,11 @@ class TestMemoryDecay:
     def test_frequently_accessed_memory_ranks_higher(self) -> None:
         """Access count boosts score."""
         now = _utc_now_iso()
-        low = EpisodicMemory._compute_decayed_score(
+        low = compute_decayed_score(
             semantic_sim=0.8, importance=0.5, access_count=0,
             last_accessed=None, created_at=now, now_iso=now,
         )
-        high = EpisodicMemory._compute_decayed_score(
+        high = compute_decayed_score(
             semantic_sim=0.8, importance=0.5, access_count=10,
             last_accessed=None, created_at=now, now_iso=now,
         )

@@ -5,11 +5,9 @@ from backend.memory.embedding import (
     APIEmbedding,
     create_embedding_provider,
 )
-from backend.memory.episodic_memory import (
-    EpisodicMemory,
-    EpisodicSnapshot,
-    MoodDetector,
-)
+from backend.memory.episodic_memory import EpisodicMemory
+from backend.memory.models import EpisodicSnapshot
+from backend.memory.mood_detector import MoodDetector
 from backend.memory.profile_schema import VALID_MOODS, UserProfile, atomic_write_json, load_profile
 
 __all__ = [

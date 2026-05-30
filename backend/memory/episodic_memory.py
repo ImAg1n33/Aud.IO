@@ -15,202 +15,25 @@ ChromaDB 存储模型:
 
 import asyncio
 import logging
-import math
 import sqlite3
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.memory.decay import compute_decayed_score
 from backend.memory.embedding import (
     EmbeddingProvider,
     create_embedding_provider,
 )
+from backend.memory.models import (
+    EpisodicSnapshot,
+    _Meta,
+    _row_to_snapshot,
+    _time_of_day,
+    _utc_now_iso,
+)
+from backend.memory.mood_detector import MoodDetector
 
 logger = logging.getLogger(__name__)
-
-# ================================================================
-# 数据模型（保持向后兼容，字段不变）
-# ================================================================
-
-
-@dataclass
-class EpisodicSnapshot:
-    """单次交互的情节快照 —— 与 SQLite episodes 表行一一对应。"""
-    id: int
-    timestamp: str                # ISO 8601 UTC
-    user_input: str               # 用户原始输入
-    assistant_reply: str          # Aud.IO 回复文本
-    played_song_name: str | None
-    played_song_artist: str | None
-    mood_tag: str | None          # 自动检测或手动指定的心情标签
-    weather_tag: str | None       # 天气标签（预留）
-    time_of_day: str              # "morning" / "afternoon" / "evening" / "night"
-    genre_tag: str | None         # 歌曲流派标签
-
-    # 语义相似度分数（仅在 vector 查询时填充，SQLite 查询为 None）
-    similarity_score: float | None = None
-
-    # RFC-007: 记忆评分与衰减字段（v0.3）
-    importance_score: float = 0.5        # 0.0-1.0，由交互深度决定（播放>推荐>闲聊）
-    access_count: int = 0               # 累计检索命中次数
-    last_accessed: str | None = None    # 最近一次被检索的 ISO 时间戳
-
-
-# ================================================================
-# 工具函数（从旧实现保留，签名不变）
-# ================================================================
-
-def _utc_now_iso() -> str:
-    """当前 UTC 时间的 ISO 8601 字符串。"""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _time_of_day() -> str:
-    """根据系统本地时间推断当前时段。
-
-    注意：使用系统本地时区而非硬编码 UTC+8（修复了架构报告 #4.1.6）。
-    """
-    now = datetime.now()
-    hour = now.hour
-    if 5 <= hour < 12:
-        return "morning"
-    elif 12 <= hour < 17:
-        return "afternoon"
-    elif 17 <= hour < 21:
-        return "evening"
-    return "night"
-
-
-# ================================================================
-# ChromaDB 元数据列名常量（方便统一修改）
-# ================================================================
-
-class _Meta:
-    """ChromaDB metadata 字段名常量。"""
-    TIMESTAMP = "timestamp"
-    USER_INPUT = "user_input"
-    ASSISTANT_REPLY = "assistant_reply"
-    SONG_NAME = "played_song_name"
-    SONG_ARTIST = "played_song_artist"
-    MOOD_TAG = "mood_tag"
-    WEATHER_TAG = "weather_tag"
-    TIME_OF_DAY = "time_of_day"
-    GENRE_TAG = "genre_tag"
-    SESSION_ID = "session_id"
-    # 用于 ChromaDB metadata 过滤的最大字符长度（避免元数据过大）
-    MAX_TEXT_LEN = 500
-
-
-# ================================================================
-# Mood 自动检测 —— 基于关键词的轻量分类器（无需 LLM，零延迟）
-# ================================================================
-
-class MoodDetector:
-    """基于中英文关键词的心情检测器。
-
-    设计理由:
-    - 零 LLM 成本、零网络延迟 —— 关键词匹配在 < 1ms 内完成
-    - 覆盖常见音乐场景心情词（轻松、专注、悲伤、兴奋、平静、浪漫、困倦等）
-    - 返回的 mood 标签与 user_profile.json 的 mood_bias 键名对齐，
-      确保后续偏好推荐能命中
-
-    注意:
-    - 如果用户输入中没有匹配到任何关键词，返回 None（不做猜测）
-    - 这不是最终方案 —— Phase 2 可升级为 embedding 相似度分类
-    """
-
-    # 中文关键词 → 英文 mood 标签（与 user_profile.json mood_bias 键对齐）
-    _CN_TO_MOOD: dict[str, str] = {
-        # 轻松 / chill
-        "轻松": "calm", "放松": "calm", "舒缓": "calm", "轻快": "calm",
-        "休闲": "calm", "chill": "calm", "relax": "calm",
-        # 专注 / 工作
-        "专注": "focused", "工作": "focused", "学习": "focused",
-        "看书": "focused", "阅读": "focused", "编程": "focused",
-        "coding": "focused", "study": "focused", "focus": "focused",
-        # 开心 / 兴奋
-        "开心": "happy", "高兴": "happy", "快乐": "happy", "嗨": "happy",
-        "兴奋": "happy", "激动": "happy", "蹦迪": "happy", "派对": "happy",
-        "party": "happy", "happy": "happy", "energetic": "happy",
-        # 悲伤 / 低落
-        "难过": "sad", "悲伤": "sad", "伤心": "sad", "低落": "sad",
-        "emo": "sad", "sad": "sad", "忧郁": "sad", "抑郁": "sad",
-        # 安静 / 平和
-        "安静": "calm", "宁静": "calm", "平和": "calm",
-        "peaceful": "calm", "quiet": "calm",
-        # 浪漫
-        "浪漫": "romantic", "浪漫主义": "romantic", "约会": "romantic",
-        "romantic": "romantic", "date": "romantic",
-        # 雨天
-        "下雨": "rainy", "雨天": "rainy", "雨声": "rainy",
-        "rain": "rainy", "rainy": "rainy",
-        # 困倦 / 深夜
-        "困": "sleepy", "困了": "sleepy", "睡觉": "sleepy", "入睡": "sleepy",
-        "催眠": "sleepy", "sleep": "sleepy", "sleepy": "sleepy",
-        # 运动
-        "运动": "energetic", "跑步": "energetic", "健身": "energetic",
-        "锻炼": "energetic", "workout": "energetic", "gym": "energetic",
-        # 开车 / 旅行
-        "开车": "driving", "驾驶": "driving", "旅途": "driving",
-        "旅行": "driving", "公路": "driving", "drive": "driving",
-        # 怀旧
-        "怀旧": "nostalgic", "回忆": "nostalgic", "老歌": "nostalgic",
-        "nostalgia": "nostalgic", "nostalgic": "nostalgic",
-    }
-
-    # 优先级更高的关键词（长度更长、更具体的关键词优先匹配）
-    _PRIORITY_KEYWORDS: list[str] = [
-        # 长关键词排在前面，确保优先匹配
-        "浪漫主义", "coding", "study", "focus", "happy", "energetic",
-        "workout", "sleep", "sleepy", "rainy", "rain", "sad",
-        "party", "chill", "relax", "quiet", "peaceful",
-        "romantic", "nostalgic", "nostalgia", "drive",
-    ]
-
-    @classmethod
-    def detect(cls, user_input: str) -> str | None:
-        """从用户输入中检测心情标签。
-
-        Args:
-            user_input: 用户原始输入文本
-
-        Returns:
-            检测到的英文 mood 标签，无匹配时返回 None
-        """
-        if not user_input or not user_input.strip():
-            return None
-
-        text = user_input.strip()
-        text_lower = text.lower()
-
-        matched_mood: str | None = None
-        matched_len: int = 0
-
-        # 遍历中英文关键词表，取最长匹配（避免 "困" 误匹配 "困难"）
-        for keyword, mood in cls._CN_TO_MOOD.items():
-            kw_lower = keyword.lower()
-            if kw_lower in text_lower or keyword in text:
-                kw_len = len(keyword)
-                # 更长关键词优先；同长度时优先级列表中靠前的优先
-                if kw_len > matched_len or (
-                    kw_len == matched_len
-                    and cls._priority_score(keyword) > cls._priority_score(matched_mood or "")
-                ):
-                    matched_mood = mood
-                    matched_len = kw_len
-
-        return matched_mood
-
-    @classmethod
-    def _priority_score(cls, keyword: str) -> int:
-        """计算关键词优先级分数（越大越优先）。"""
-        try:
-            # 低索引 = 高优先级
-            idx = cls._PRIORITY_KEYWORDS.index(keyword.lower())
-            return len(cls._PRIORITY_KEYWORDS) - idx
-        except ValueError:
-            return 0
 
 
 # ================================================================
@@ -623,51 +446,6 @@ class EpisodicMemory:
     # 记忆衰减评分引擎 (RFC-007 — v0.3)
     # ================================================================
 
-    @staticmethod
-    def _compute_decayed_score(
-        semantic_sim: float,
-        importance: float,
-        access_count: int,
-        last_accessed: str | None,
-        created_at: str,
-        now_iso: str,
-    ) -> float:
-        """Compute a weighted retrieval score combining semantic similarity
-        with memory decay factors.
-
-        Weights (tuned for a personal music DJ — recent & important > old):
-          semantic_sim * 0.50  — vector similarity (ChromaDB cosine)
-          importance    * 0.20  — how valuable this memory is
-          freshness     * 0.20  — Ebbinghaus decay since last access
-          access_bonus  * 0.10  — frequently accessed memories stay "hot"
-
-        Returns a score in [0.0, 1.0].
-        """
-        # Importance: direct
-        imp = max(0.0, min(1.0, importance))
-
-        # Freshness: Ebbinghaus-inspired decay since last access (or creation)
-        ref_ts = last_accessed or created_at
-        try:
-            ref_dt = datetime.fromisoformat(ref_ts.replace("Z", "+00:00"))
-            now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
-            hours_elapsed = (now_dt - ref_dt).total_seconds() / 3600.0
-        except (ValueError, TypeError):
-            hours_elapsed = 24.0  # Fallback: treat as 1 day old
-
-        # Half-life of ~7 days (168 hours) for un-reinforced memories
-        freshness = math.exp(-hours_elapsed / 168.0)
-
-        # Access bonus: log-scale, saturates around 10 accesses
-        access_bonus = math.log(access_count + 1) / math.log(11)
-
-        return (
-            semantic_sim * 0.50
-            + imp * 0.20
-            + freshness * 0.20
-            + access_bonus * 0.10
-        )
-
     def _load_decay_fields_batch(
         self, snapshot_ids: list[int]
     ) -> dict[int, tuple[float, int, str | None]]:
@@ -805,7 +583,7 @@ class EpisodicMemory:
                 raw_sim = snap.similarity_score or 0.5
                 snap.similarity_score = raw_sim  # keep original cosine
                 # Attach decayed score as a transient attribute for sorting
-                snap._decayed_score = self._compute_decayed_score(  # type: ignore[attr-defined]
+                snap._decayed_score = compute_decayed_score(
                     semantic_sim=raw_sim,
                     importance=imp,
                     access_count=acc,
@@ -1253,31 +1031,3 @@ class EpisodicMemory:
         return await asyncio.to_thread(_query)
 
 
-# ================================================================
-# 旧版兼容函数
-# ================================================================
-
-def _row_to_snapshot(row: tuple[Any, ...]) -> EpisodicSnapshot:
-    """将 SQLite 行元组映射为 EpisodicSnapshot。"""
-    # Decay fields are at indices 11-13 (added by migration v2).
-    # Handle pre-migration rows gracefully (fewer columns).
-    importance = float(row[11]) if len(row) > 11 and row[11] is not None else 0.5
-    access_count = int(row[12]) if len(row) > 12 and row[12] is not None else 0
-    last_accessed = str(row[13]) if len(row) > 13 and row[13] is not None else None
-
-    return EpisodicSnapshot(
-        id=row[0],
-        timestamp=row[1],
-        user_input=row[2],
-        assistant_reply=row[3],
-        played_song_name=row[4],
-        played_song_artist=row[5],
-        mood_tag=row[6],
-        weather_tag=row[7],
-        time_of_day=row[8],
-        genre_tag=row[9],
-        similarity_score=None,
-        importance_score=importance,
-        access_count=access_count,
-        last_accessed=last_accessed,
-    )

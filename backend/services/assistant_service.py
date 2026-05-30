@@ -301,10 +301,29 @@ class AssistantService:
 
         yield self._sse("text", reply.get("answer", ""))
 
-        # === EXECUTE ===
+        # === EXECUTE (with retry loop — RFC-007: streaming path now retries) ===
         actions = self._parse_actions_from_reply(reply)
         results = await self.tool_executor.execute_actions(actions)
         final_reply = await self._merge_tool_results(reply, results)
+
+        retry_count = 0
+        while self._collect_retry_contexts(results):
+            if retry_count >= self.MAX_RETRIES:
+                final_reply = self._build_graceful_fallback(final_reply)
+                break
+
+            retry_count += 1
+            feedback = build_retry_feedback(final_reply, self._collect_retry_contexts(results))
+            retry_input = f"{user_input}\n\n[System: {feedback}]"
+            retry_prompt = await assembler.assemble(
+                retry_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
+            )
+
+            # Retry silently via non-streaming LLM — user already saw the original text
+            retry_reply = await call_llm(NON_STREAMING_SYSTEM, retry_prompt)
+            retry_actions = self._parse_actions_from_reply(retry_reply)
+            results = await self.tool_executor.execute_actions(retry_actions)
+            final_reply = await self._merge_tool_results(retry_reply, results)
 
         music = final_reply.get("music")
         if isinstance(music, dict) and music.get("song_id"):

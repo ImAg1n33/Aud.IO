@@ -28,7 +28,6 @@ from backend.memory.embedding import (
 )
 from backend.memory.models import (
     EpisodicSnapshot,
-    _Meta,
     _time_of_day,
     _utc_now_iso,
 )

@@ -174,9 +174,6 @@ Aud.IO/
 ├── docker-compose.yml                  # 三服务编排
 ├── tests/                              # pytest (155 cases, 12 files)
 ├── docs/
-│   ├── architecture-reports/
-│   │   ├── versions/                   # 架构版本快照 (v0.1→v0.3)
-│   │   └── rfcs/                       # 设计提案 (RFC-001→008)
 │   ├── architecture.md / api.md / security-playbook.md
 ├── .github/workflows/ci.yml            # CI: Python 3.11+3.12, ruff, pytest, secret scan
 ├── LICENSE / CONTRIBUTING.md / CODE_OF_CONDUCT.md / SECURITY.md / CHANGELOG.md
@@ -196,10 +193,6 @@ Aud.IO/
 | 安全 | Pre-commit Hook 拦截凭证提交，`.gitignore` 保护 `.env` 和记忆数据 |
 | 容错 | LLM 流式中断优雅降级，版权歌曲自动换曲重试（最多 2 次），ChromaDB 降级到 SQLite |
 | 代码质量 | ruff All checks passed，零未使用导入，零死代码 |
-
----
-
-架构决策以 RFC 形式记录在本地 `docs/architecture-reports/` 中（不入库，纯私人草稿）。
 
 ---
 

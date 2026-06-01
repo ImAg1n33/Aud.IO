@@ -194,44 +194,13 @@ class EpisodicMemoryProvider(ContextProvider):
     """情节记忆上下文提供者 —— 注入与当前用户意图语义相似的历史交互。
 
     v2.0: 主路径使用 query_by_semantic() 做向量语义检索。
-    v2.1 (RFC-007): _CN_MOOD_MAP 保留用于兼容，主 mood 词表来源统一为
-    profile_schema.VALID_MOODS。
+    Mood 检测统一由 MoodDetector 负责 —— 此处不再维护重复的词表。
     """
 
     name = "episodic_memory"
 
-    # 中文→英文 mood 辅助映射（与 profile_schema.VALID_MOODS 对齐）
-    _CN_MOOD_MAP: dict[str, str] = {
-        "开心": "happy", "高兴": "happy", "快乐": "happy",
-        "难过": "sad", "悲伤": "sad", "低落": "sad", "伤心": "sad", "emo": "sad",
-        "专注": "focused", "工作": "focused", "学习": "focused", "coding": "focused",
-        "平静": "calm", "安静": "calm", "放松": "calm", "relax": "calm", "chill": "calm",
-        "下雨": "rainy", "雨天": "rainy", "雨": "rainy", "rain": "rainy",
-        "兴奋": "energetic", "激动": "energetic", "运动": "energetic", "跑步": "energetic",
-        "浪漫": "romantic", "约会": "romantic", "romantic": "romantic",
-        "困": "sleepy", "困了": "sleepy", "睡觉": "sleepy", "sleep": "sleepy",
-        "开车": "driving", "驾驶": "driving", "旅途": "driving", "drive": "driving",
-        "怀旧": "nostalgic", "回忆": "nostalgic", "老歌": "nostalgic",
-    }
-
-    def __init__(self, episodic: EpisodicMemory, mood_keys: list[str] | None = None) -> None:
+    def __init__(self, episodic: EpisodicMemory) -> None:
         self._episodic = episodic
-        self._mood_keys = [k.lower() for k in (mood_keys or []) if k.strip()]
-
-    def _detect_moods(self, user_input: str) -> list[str]:
-        """从用户输入检测心情标签（中英文关键词映射）。"""
-        lowered = user_input.lower()
-        matched: set[str] = set()
-
-        for mk in self._mood_keys:
-            if mk in lowered:
-                matched.add(mk)
-
-        for cn_word, en_mood in self._CN_MOOD_MAP.items():
-            if cn_word in user_input and en_mood in self._mood_keys:
-                matched.add(en_mood)
-
-        return list(matched)
 
     async def get_context(
         self, intent: Intent, user_input: str, metadata: dict[str, Any]

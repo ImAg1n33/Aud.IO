@@ -130,13 +130,13 @@ class TestToolSchemaProvider:
 class TestEpisodicMemoryProvider:
     @pytest.mark.asyncio
     async def test_returns_none_for_chitchat(self, episodic_memory) -> None:
-        provider = EpisodicMemoryProvider(episodic_memory, mood_keys=["happy", "sad"])
+        provider = EpisodicMemoryProvider(episodic_memory)
         result = await provider.get_context(Intent.CHITCHAT, "hello", {})
         assert result is None
 
     @pytest.mark.asyncio
     async def test_returns_none_when_no_match(self, episodic_memory) -> None:
-        provider = EpisodicMemoryProvider(episodic_memory, mood_keys=["happy", "sad"])
+        provider = EpisodicMemoryProvider(episodic_memory)
         result = await provider.get_context(Intent.MUSIC_PLAY, "play jazz", {})
         assert result is None  # No mood match, no temporal signal
 
@@ -156,7 +156,7 @@ class TestEpisodicMemoryProvider:
             "feeling down", "Playing sad piano.",
             mood_tag="sad", played_song={"name": "Sad Song", "artist": "Pianist"}
         )
-        provider = EpisodicMemoryProvider(episodic_memory, mood_keys=["happy", "sad", "calm"])
+        provider = EpisodicMemoryProvider(episodic_memory)
         # No temporal signal, but "sad" mood matches
         result = await provider.get_context(Intent.MUSIC_PLAY, "心情低落想听点悲伤的音乐", {})
         assert result is not None
@@ -168,7 +168,7 @@ class TestEpisodicMemoryProvider:
             "play sad song", "Here is a sad one.", mood_tag="sad",
             played_song={"name": "Unique", "artist": "T"}
         )
-        provider = EpisodicMemoryProvider(episodic_memory, mood_keys=["sad"])
+        provider = EpisodicMemoryProvider(episodic_memory)
         # Same snapshot should not appear twice if temporal AND mood both return it
         result = await provider.get_context(Intent.MUSIC_PLAY, "上次那首 心情很悲伤", {})
         assert result is not None

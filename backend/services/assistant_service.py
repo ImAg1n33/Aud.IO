@@ -200,10 +200,6 @@ class AssistantService:
         intent = await self.intent_classifier.classify_async(user_input)
         metadata: dict[str, Any] = dict(context or {})
 
-        profile = ctx.memory_manager.get_profile()
-        mood_bias = profile.get("mood_bias", {}) if isinstance(profile, dict) else {}
-        self.episodic_provider._mood_keys = [k.lower() for k in mood_bias.keys() if k.strip()]
-
         # ═══════════════════════════════════════════════════════════
         # RFC-003 Two-Pass path — MUSIC_PLAY only
         # ═══════════════════════════════════════════════════════════

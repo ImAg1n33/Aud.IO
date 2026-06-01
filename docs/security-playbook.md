@@ -16,16 +16,15 @@ Run these steps if any key or cookie may have been exposed in chat, screenshots,
 Run in repository root:
 
 ```powershell
-git ls-files backend/.env backend/memory/taste.md backend/memory/routines.md
+git ls-files backend/.env
 ```
 
 Expected output: empty.
 
-If any file appears, untrack it without deleting local content:
+If the file appears, untrack it without deleting local content:
 
 ```powershell
 git rm --cached backend/.env
-git rm --cached backend/memory/taste.md backend/memory/routines.md
 ```
 
 Then commit the cleanup.

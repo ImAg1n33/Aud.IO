@@ -12,10 +12,9 @@ from enum import Enum
 from typing import ClassVar
 
 import httpx
+from backend.agent.prompts import INTENT_CLASSIFIER_SYSTEM
 
 logger = logging.getLogger(__name__)
-
-from backend.agent.prompts import INTENT_CLASSIFIER_SYSTEM
 
 # ── LLM config ──
 

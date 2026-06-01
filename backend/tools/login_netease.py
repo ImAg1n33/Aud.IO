@@ -1,7 +1,6 @@
 """NetEase Cloud Music QR-code login — unified httpx sync backend."""
 
 import base64
-import json
 import time
 from pathlib import Path
 

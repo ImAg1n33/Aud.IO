@@ -5,7 +5,6 @@ from typing import Any
 
 from backend.tools.base import (
     MusicCopyrightError,
-    ToolError,
     ToolExecutionError,
     ToolNotFoundError,
     ToolResult,

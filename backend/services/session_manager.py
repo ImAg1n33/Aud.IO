@@ -7,7 +7,6 @@ Sessions idle beyond TTL are evicted automatically by cachetools.TTLCache.
 
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cachetools import TTLCache

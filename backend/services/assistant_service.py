@@ -13,8 +13,6 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from backend.agent.context_assembler import (
     ContextAssembler,
     ConversationHistoryProvider,
@@ -43,6 +41,8 @@ from backend.memory.embedding import EmbeddingProvider
 from backend.memory.episodic_memory import EpisodicMemory
 from backend.services.session_manager import SessionManager
 from backend.tools.netease_api import get_song_mp3_url, search_first_song
+
+logger = logging.getLogger(__name__)
 
 
 class AssistantService:
@@ -299,7 +299,6 @@ class AssistantService:
             elif isinstance(chunk, dict):
                 reply = chunk
                 if reply.get("analysis") == "Model call failed.":
-                    stream_interrupted = reply.get("stream_interrupted", False)
                     error_msg = reply.get("answer", "Request failed")
                     yield self._sse("error", error_msg)
                     return

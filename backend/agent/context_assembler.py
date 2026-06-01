@@ -13,10 +13,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 import httpx
-
 from backend.agent.intent_classifier import Intent
 from backend.agent.memory_manager import MemoryManager
 from backend.agent.prompts import format_resolved_song
@@ -24,6 +21,7 @@ from backend.memory.conversation_memory import ConversationMemory
 from backend.memory.episodic_memory import EpisodicMemory, EpisodicSnapshot
 from backend.tools.base import tool_registry
 
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # Provider interface

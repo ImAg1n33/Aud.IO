@@ -267,15 +267,20 @@ class SqliteRepository:
         params: list[Any] = []
 
         if mood_tag:
-            conditions.append("mood_tag = ?"); params.append(mood_tag)
+            conditions.append("mood_tag = ?")
+            params.append(mood_tag)
         if weather_tag:
-            conditions.append("weather_tag = ?"); params.append(weather_tag)
+            conditions.append("weather_tag = ?")
+            params.append(weather_tag)
         if time_of_day:
-            conditions.append("time_of_day = ?"); params.append(time_of_day)
+            conditions.append("time_of_day = ?")
+            params.append(time_of_day)
         if genre_tag:
-            conditions.append("genre_tag = ?"); params.append(genre_tag)
+            conditions.append("genre_tag = ?")
+            params.append(genre_tag)
         if session_id:
-            conditions.append("session_id = ?"); params.append(session_id)
+            conditions.append("session_id = ?")
+            params.append(session_id)
 
         if not conditions:
             return await self.query_recent(limit=limit)

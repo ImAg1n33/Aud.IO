@@ -116,6 +116,6 @@ def load_profile(path: Path) -> UserProfile:
         if not profile.last_updated or not profile.last_updated.strip():
             profile.last_updated = _utc_now_iso()
         return profile
-    except Exception:
-        # If the LLM somehow wrote an unrecoverable schema, fall back to default
+    except Exception:  # noqa: BLE001 — must not crash on corrupt profile
+        # LLM may write unrecoverable schema; fall back to default silently
         return default

@@ -6,11 +6,14 @@ schema) are handled by callers via prompts.py and sent as role="system".
 """
 import asyncio
 import json
+import logging
 import os
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import httpx
 
@@ -219,6 +222,7 @@ class EpisodicMemoryProvider(ContextProvider):
             for snap in semantic_results:
                 snapshots_by_id[snap.id] = snap
         except Exception:
+            logger.debug("Semantic search unavailable, continuing without past interactions")
             pass
 
         # 2) Temporal reference signals
@@ -300,6 +304,10 @@ class ContextAssembler:
                 if block:
                     context_blocks.append(block)
             except Exception:
+                logger.warning(
+                    "Provider '%s' failed, skipping: ", type(provider).__name__,
+                    exc_info=True,
+                )
                 continue
 
         context_text = "\n\n".join(context_blocks) if context_blocks else "- none"

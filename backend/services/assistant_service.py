@@ -7,10 +7,13 @@ All prompt text lives in backend.agent.prompts.
 
 import asyncio
 import json
+import logging
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from backend.agent.context_assembler import (
     ContextAssembler,
@@ -198,6 +201,7 @@ class AssistantService:
 
         # === PERCEIVE ===
         intent = await self.intent_classifier.classify_async(user_input)
+        logger.debug("Intent: %s, input: %.60s...", intent.value, user_input)
         metadata: dict[str, Any] = dict(context or {})
 
         # ═══════════════════════════════════════════════════════════
@@ -209,6 +213,10 @@ class AssistantService:
             song_data = await self._phase1_prefetch(user_input, sid, metadata)
 
             if song_data is not None:
+                logger.info(
+                    "Phase 1 OK: '%s' → %s - %s",
+                    user_input, song_data["artist"], song_data["name"],
+                )
                 # ── Phase 2: Radio DJ timing ──
                 yield self._sse(
                     "status",
@@ -261,6 +269,7 @@ class AssistantService:
                 return
 
             # Phase 1 failed — DJ breaks the news naturally
+            logger.info("Phase 1 miss: '%s'", user_input)
             yield self._sse("status", '{"phase":"not_found"}')
 
             fail_user_prompt = build_phase1_fail_user_prompt(user_input)

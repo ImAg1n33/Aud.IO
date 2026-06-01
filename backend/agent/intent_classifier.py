@@ -6,11 +6,14 @@ eliminating song-title-vs-emotion ambiguity for phrases like "来一首嫉妒".
 
 import asyncio
 import json
+import logging
 import os
 from enum import Enum
 from typing import ClassVar
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from backend.agent.prompts import INTENT_CLASSIFIER_SYSTEM
 
@@ -80,7 +83,7 @@ class IntentClassifier:
             if isinstance(intent, Intent):
                 return intent
         except Exception:
-            pass
+            logger.debug("LLM intent classify failed, using keyword fallback")
         return self.classify(user_input)
 
     async def _classify_via_llm(self, user_input: str) -> Intent:

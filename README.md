@@ -63,14 +63,15 @@
 
 | 层 | 技术选型 | 为什么 |
 |----|----------|--------|
-| 前端 | Vue 3 + Pinia + Vite 8 | SPA，4 组件拆分，Web Audio API，手写 CSS |
-| 后端 | FastAPI + Uvicorn | 异步原生支持，SSE 流式零额外开销 |
+| 前端 | Vue 3 + Pinia + Vite 8 | SPA，4 组件拆分，Web Audio API，手写 CSS，SSE 状态机解析 |
+| 后端 | FastAPI + Uvicorn | 异步原生支持，SSE 流式零额外开销，全链路 session 隔离 |
 | LLM | DeepSeek（OpenAI 兼容协议） | 5 条调用路径，System Role 规范，分层 Prompt |
 | 向量记忆 | ChromaDB + ONNX all-MiniLM-L6-v2 | 完全本地离线，~80MB 模型，首次自动下载 |
 | SQL 记忆 | SQLite | 双写兼容，SQL 聚合统计，语义检索降级回退 |
 | 数据库迁移 | schema_version 表 + MigrationManager | 版本化、幂等，支持增量 DDL + ChromaDB 回填 |
 | 音乐服务 | NetEase Cloud Music API | 曲库覆盖广，Cookie 过期自动检测 + 瞬时错误重试 |
 | 工具协议 | MCP (Model Context Protocol) | JSON-RPC stdio transport，支持外部工具发现 |
+| 运行时数据 | `backend/data/`（`AUD_IO_DATA_DIR` 可配） | 与源码解耦，Docker volume 单目录映射，备份/迁移明确 |
 
 ---
 
@@ -128,7 +129,11 @@ Aud.IO/
 ├── backend/
 │   ├── main.py                         # FastAPI 入口 + MCP 生命周期
 │   ├── .env / .env.example
-│   ├── api/routes_agent.py             # REST + SSE 端点
+│   ├── data/                            # 运行时数据 (episodes.db / chroma / profiles)
+│   ├── data_config.py                   # 数据路径统一管理 (AUD_IO_DATA_DIR)
+│   ├── api/
+│   │   ├── routes_agent.py              # REST + SSE 端点
+│   │   └── _security.py                 # session_id 校验
 │   ├── services/
 │   │   ├── assistant_service.py        # ★ 核心编排 (Perceive→Decide→Execute→Record)
 │   │   └── session_manager.py          # TTL 会话池
@@ -168,7 +173,8 @@ Aud.IO/
 │       │   ├── InputBar.vue            # 用户输入
 │       │   └── DebugPanel.vue          # JSON 调试面板
 │       ├── stores/
-│       │   ├── chat.js                 # SSE 解析 + 打字机引擎
+│       │   ├── chat.js                 # SSE 事件处理 + 打字机引擎
+│       │   ├── sse-parser.js           # SSE 状态机解析器 (跨 chunk 鲁棒)
 │       │   └── player.js               # Web Audio API + 播放状态
 │       └── style.css                   # Nothing Design 暗/亮双模式
 ├── docker-compose.yml                  # 三服务编排
@@ -190,9 +196,9 @@ Aud.IO/
 |------|------|
 | 测试 | pytest + pytest-asyncio，155 用例覆盖全部模块 |
 | CI | GitHub Actions：Python 3.11 + 3.12 matrix，ruff lint 门禁，secret scan |
-| 安全 | Pre-commit Hook 拦截凭证提交，`.gitignore` 保护 `.env` 和记忆数据 |
-| 容错 | LLM 流式中断优雅降级，版权歌曲自动换曲重试（最多 2 次），ChromaDB 降级到 SQLite |
-| 代码质量 | ruff All checks passed，零未使用导入，零死代码 |
+| 安全 | Pre-commit Hook 拦截凭证提交，session_id 白名单校验，`.gitignore` 保护运行时数据 |
+| 容错 | LLM 流式中断优雅降级，版权歌曲自动换曲重试（最多 2 次），ChromaDB 降级到 SQLite，SSE 跨 chunk 鲁棒 |
+| 代码质量 | ruff All checks passed，零未使用导入，零死代码，源码与运行时数据分离 |
 
 ---
 

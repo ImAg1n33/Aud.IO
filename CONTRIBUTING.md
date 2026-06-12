@@ -9,7 +9,7 @@ Thanks for your interest in contributing. Aud.IO is an AI-powered music DJ — a
 - Python 3.11+
 - Node.js 18+
 - Docker & Docker Compose (optional, for full-stack deployment)
-- A DeepSeek API key (or OpenAI / Anthropic compatible)
+- A DeepSeek API key (or any OpenAI-compatible provider)
 
 ### Setup
 
@@ -52,10 +52,12 @@ See the [README](README.md) for the full architecture diagram. Key directories:
 ```
 backend/
   agent/          LLM orchestration, prompts, intent classification
-  memory/         ChromaDB + SQLite episodic memory, user profiles
+  memory/         ChromaDB + SQLite episodic memory (source code only)
   tools/          Tool registry, MCP adapter, NetEase API
   services/       Session management, assistant pipeline
-  api/            FastAPI routes
+  api/            FastAPI routes + input validation
+  data/           Runtime data (episodes.db, chroma, profiles) — not in git
+  data_config.py  Central data-path resolution (AUD_IO_DATA_DIR)
 frontend/
   src/
     components/   ChatPanel, PlayerPanel, InputBar, DebugPanel

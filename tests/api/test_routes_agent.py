@@ -42,3 +42,17 @@ async def test_agent_respond_route_returns_json(monkeypatch) -> None:
     assert captured["generated"][0] == "hello"
     assert captured["generated"][2] == "s1"
     assert captured["scheduled"][0] == "hello"
+
+
+def test_invalid_session_id_returns_400() -> None:
+    from fastapi.testclient import TestClient
+    from backend.main import app
+
+    client = TestClient(app)
+    response = client.post(
+        "/v1/agent/respond",
+        json={"user_input": "hello", "session_id": "../../etc/passwd"},
+    )
+    assert response.status_code == 400
+    detail = response.json().get("detail", "")
+    assert "Invalid session_id" in detail

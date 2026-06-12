@@ -23,6 +23,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - PHASE2_STREAM_SYSTEM missing JSON format example causing empty DJ scripts
 - f-string brace escaping in Phase 2 prompt preventing module import on CI
 
+## [0.3.1] — 2026-06-12
+
+### Fixed
+- `.env` loading order: `load_dotenv()` now runs before all backend imports, ensuring `AUD_IO_DATA_DIR`, `EMBEDDING_PROVIDER`, `MEMORY_MODEL` etc. take effect during service initialization
+- Illegal `session_id` now returns HTTP 400 instead of 500
+
+### Added
+- `normalize_session_id()` input validation (accepts UUID / safe slug, rejects path traversal)
+- `SSEParser` state machine for cross-chunk SSE event resilience
+- `/ready` endpoint expanded with LLM, Embedding, ChromaDB, NetEase, MCP status fields
+
+### Changed
+- Runtime data directory moved from `backend/memory/` to `backend/data/` (`AUD_IO_DATA_DIR` env var)
+- `ContextAssembler.assemble()` passes `session_id` to all memory providers (session-scoped recall)
+- Version string corrected: `0.2.0` → `0.3.1`
+- Removed stale `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` references (Anthropic Messages API not supported)
+
+### Security
+- `session_id` validated at API boundary against path traversal
+- Runtime data (episodes, profiles, chroma) isolated from source tree in `backend/data/`
+
 ## [0.2.1] — 2026-05-24
 
 - Architecture roadmap published

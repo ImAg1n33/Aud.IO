@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -26,7 +26,10 @@ class AgentResponse(BaseModel):
 
 @router.post("/respond", response_model=AgentResponse)
 async def agent_respond(payload: AgentRequest, background_tasks: BackgroundTasks) -> AgentResponse:
-    sid = normalize_session_id(payload.session_id)
+    try:
+        sid = normalize_session_id(payload.session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     final_reply, prompt = await assistant_service.generate_reply(
         payload.user_input, payload.context, session_id=sid,
     )
@@ -45,7 +48,10 @@ async def agent_respond_stream(payload: AgentRequest, background_tasks: Backgrou
       event: music  → JSON music object (trigger playback)
       event: done   → JSON full reply (debug panel)
     """
-    sid = normalize_session_id(payload.session_id)
+    try:
+        sid = normalize_session_id(payload.session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     async def generate():
         full_reply: dict[str, Any] = {}

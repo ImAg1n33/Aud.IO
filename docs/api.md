@@ -17,14 +17,18 @@ Health check.
 
 ## GET /ready
 
-Readiness check with MCP status.
+Readiness check with configuration status.
 
 **Response** `200`:
 ```json
 {
   "ready": true,
-  "mcp_servers": 0,
-  "mcp_tools": 0
+  "version": "0.3.1",
+  "llm": {"provider": "deepseek", "model": "deepseek-v4-flash", "base_url": "https://api.deepseek.com", "configured": true},
+  "embedding": {"provider": "onnx"},
+  "chromadb": {"ok": true, "documents": 42},
+  "netease": {"configured": true},
+  "mcp": {"servers": 0, "tools": 0}
 }
 ```
 

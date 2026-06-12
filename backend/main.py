@@ -4,16 +4,20 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routes_agent import router as agent_router
-from backend.agent.llm_client import _get_llm_config
-from backend.data_config import ensure_data_dirs, get_data_dir
-from backend.tools.mcp_adapter import MCPClientManager, register_mcp_tools
-
+# ── .env must load before ANY backend.* import ──────────────────────
+# routes_agent creates AssistantService() at module level (import time),
+# which reads os.getenv() for LLM keys, embedding mode, data paths, etc.
 load_dotenv(Path(__file__).resolve().parent / ".env")
+
+from backend.data_config import ensure_data_dirs, get_data_dir  # noqa: E402
 ensure_data_dirs()
+
+from backend.api.routes_agent import router as agent_router  # noqa: E402
+from backend.agent.llm_client import _get_llm_config  # noqa: E402
+from backend.tools.mcp_adapter import MCPClientManager, register_mcp_tools  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

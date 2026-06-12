@@ -14,10 +14,10 @@
 #           └── /*            ──SPA──▶     index.html (Vue Router)
 #
 # 数据持久化（挂载到宿主机）：
-#   ./backend/memory/  →  /app/backend/memory/
+#   ./backend/data/  →  /app/backend/data/
 #     ├── episodes.db          SQLite 情节记忆
 #     ├── chroma_episodes/     ChromaDB 向量索引
-#     ├── user_profile.json    用户画像
+#     ├── profiles/            用户画像
 #     └── memory_update.log    画像审计日志
 # ============================================================
 
@@ -42,9 +42,9 @@ services:
       - TZ=Asia/Shanghai
 
     volumes:
-      # 记忆数据持久化 —— 整个 memory 目录挂载到宿主机
-      # 容器内路径 /app/backend/memory/ 与 Python 包的 Path(__file__).resolve().parents[1] 对齐
-      - ./backend/memory:/app/backend/memory
+      # 运行时数据持久化 —— 整个 data 目录挂载到宿主机
+      # 容器内路径由 AUD_IO_DATA_DIR 或默认 backend/data/ 控制
+      - ./backend/data:/app/backend/data
       # .env 只读挂载 —— 供 load_dotenv 查找（main.py 同级），同时 env_file 保证变量已注入
       - ./backend/.env:/app/backend/.env:ro
       # ChromaDB ONNX 嵌入模型缓存 (79MB, 首次下载后持久化)

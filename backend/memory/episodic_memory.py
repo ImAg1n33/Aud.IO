@@ -18,6 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from backend.data_config import ensure_data_dirs, get_chroma_path, get_db_path
 from backend.memory._chroma_repo import ChromaRepository
 from backend.memory._migration import MigrationManager
 from backend.memory._sqlite_repo import SqliteRepository
@@ -79,13 +80,17 @@ class EpisodicMemory:
         """初始化情节记忆存储。
 
         Args:
-            db_path: SQLite 数据库文件路径（None = 默认 backend/memory/episodes.db）
+            db_path: SQLite 数据库文件路径（None = 默认 backend/data/episodes.db）
             embedding_provider: 向量嵌入提供者（None = 根据环境变量自动选择）
         """
         # --- 路径初始化（兼容 str 和 Path） ---
         if db_path is None:
-            backend_root = Path(__file__).resolve().parents[1]
-            db_path = backend_root / "memory" / "episodes.db"
+            ensure_data_dirs()
+            db_path = get_db_path()
+            chroma_path = str(get_chroma_path())
+        else:
+            db_path = Path(db_path)
+            chroma_path = str(db_path.parent / "chroma_episodes")
         self.db_path = Path(db_path)  # 确保是 Path 对象，兼容调用方传 str
         self._sqlite = SqliteRepository(self.db_path)
 
@@ -93,7 +98,6 @@ class EpisodicMemory:
         self._embed = embedding_provider or create_embedding_provider()
 
         # --- ChromaDB (必须在 MigrationManager 之前，v1 迁移需要 collection) ---
-        chroma_path = str(self.db_path.parent / "chroma_episodes")
         self._chroma = ChromaRepository(chroma_path, self._embed)
         self._chroma.initialize()
 

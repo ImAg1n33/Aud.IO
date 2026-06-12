@@ -72,7 +72,8 @@ class UserPreferenceProvider(ContextProvider):
 
         stats_block: str | None = None
         if self._episodic:
-            stats = await self._episodic.get_preference_stats()
+            sid = metadata.get("_session_id") if isinstance(metadata, dict) else None
+            stats = await self._episodic.get_preference_stats(session_id=sid)
             stats_block = self._episodic.format_stats_for_prompt(stats)
 
         if not summary and not stats_block:
@@ -209,6 +210,7 @@ class EpisodicMemoryProvider(ContextProvider):
         if intent not in {Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND}:
             return None
 
+        sid = metadata.get("_session_id") if isinstance(metadata, dict) else None
         snapshots_by_id: dict[int, EpisodicSnapshot] = {}
 
         # 1) Semantic vector search
@@ -216,6 +218,7 @@ class EpisodicMemoryProvider(ContextProvider):
             semantic_results = await self._episodic.query_by_semantic(
                 query_text=user_input,
                 limit=5,
+                session_id=sid,
             )
             for snap in semantic_results:
                 snapshots_by_id[snap.id] = snap
@@ -230,7 +233,7 @@ class EpisodicMemoryProvider(ContextProvider):
             "again", "再", "又",
         ]
         if any(sig in user_input for sig in temporal_signals):
-            recent = await self._episodic.query_recent(limit=3)
+            recent = await self._episodic.query_recent(limit=3, session_id=sid)
             for snap in recent:
                 snapshots_by_id[snap.id] = snap
 
@@ -280,6 +283,7 @@ class ContextAssembler:
         metadata: dict[str, Any] | None = None,
         resolved_song: dict[str, Any] | None = None,
         tool_constraints: str = "",
+        session_id: str | None = None,
     ) -> str:
         """Build the user-prompt: context blocks + optional extras + user input.
 
@@ -289,11 +293,14 @@ class ContextAssembler:
             metadata: Frontend context (Currently Playing, raw_context, etc.).
             resolved_song: (RFC-003) Real song data from Phase 1 pre-fetch.
             tool_constraints: Optional tool usage rules block (used by single-pass).
+            session_id: Current session for per-session memory isolation.
 
         Returns:
             The user-prompt string to send as role="user".
         """
         meta = dict(metadata or {})
+        if session_id:
+            meta["_session_id"] = session_id
         context_blocks: list[str] = []
 
         for provider in self.providers:

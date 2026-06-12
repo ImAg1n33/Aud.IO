@@ -16,12 +16,8 @@ env/
 .env.*
 !.env.example
 
-# Local memory context (never commit personal data — these contain user interaction history)
-backend/memory/user_profile.json
-backend/memory/user_profile_*.json
-backend/memory/episodes.db
-backend/memory/memory_update.log
-backend/memory/chroma_episodes/
+# Runtime data (never commit personal data — episodes, profiles, chroma, logs, cache)
+backend/data/
 backend/.chroma_cache/
 backend/qrcode.png
 

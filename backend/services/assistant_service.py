@@ -55,10 +55,9 @@ class AssistantService:
         episodic_db_path: Path | None = None,
         embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
-        backend_root = Path(__file__).resolve().parents[1]
         self.session_manager = SessionManager(ttl=self.SESSION_TTL, maxsize=self.MAX_SESSIONS)
         self.episodic_memory = EpisodicMemory(
-            db_path=episodic_db_path or (backend_root / "memory" / "episodes.db"),
+            db_path=episodic_db_path,  # None triggers data_config defaults
             embedding_provider=embedding_provider,
         )
         self.intent_classifier = IntentClassifier()
@@ -133,6 +132,7 @@ class AssistantService:
         assembler = self._build_context_assembler(sid)
         user_prompt = await assembler.assemble(
             user_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
+            session_id=sid,
         )
 
         # === DECIDE + EXECUTE (with retry loop) ===
@@ -159,6 +159,7 @@ class AssistantService:
             working_input = f"{user_input}\n\n[System: {feedback}]"
             user_prompt = await assembler.assemble(
                 working_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
+                session_id=sid,
             )
 
         # === RECORD ===
@@ -234,6 +235,7 @@ class AssistantService:
                 assembler = self._build_phase2_assembler(sid)
                 user_prompt = await assembler.assemble(
                     user_input, intent, metadata, resolved_song=song_data,
+                    session_id=sid,
                 )
 
                 # Stream DJ script over the already-playing music
@@ -289,6 +291,7 @@ class AssistantService:
         assembler = self._build_context_assembler(sid)
         user_prompt = await assembler.assemble(
             user_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
+            session_id=sid,
         )
 
         reply: dict[str, Any] = {}
@@ -321,6 +324,7 @@ class AssistantService:
             retry_input = f"{user_input}\n\n[System: {feedback}]"
             retry_prompt = await assembler.assemble(
                 retry_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
+                session_id=sid,
             )
 
             # Retry silently via non-streaming LLM — user already saw the original text

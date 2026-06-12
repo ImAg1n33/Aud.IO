@@ -8,9 +8,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes_agent import router as agent_router
+from backend.agent.llm_client import _get_llm_config
+from backend.data_config import ensure_data_dirs, get_data_dir
 from backend.tools.mcp_adapter import MCPClientManager, register_mcp_tools
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
+ensure_data_dirs()
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,7 @@ async def _app_lifespan(app: FastAPI):
 # App
 # ================================================================
 
-app = FastAPI(title="Aud.IO API", version="0.2.0", lifespan=_app_lifespan)
+app = FastAPI(title="Aud.IO API", version="0.3.1", lifespan=_app_lifespan)
 
 
 def _parse_cors_origins(value: str | None) -> list[str]:
@@ -90,11 +93,46 @@ def health() -> dict[str, str]:
 
 
 @app.get("/ready")
-def ready() -> dict:
+async def ready() -> dict:
     mcp_servers = _mcp_manager.server_count if _mcp_manager else 0
     mcp_tools = _mcp_manager.adapter_count if _mcp_manager else 0
+
+    # ── LLM config ──────────────────────────────────────────────
+    llm_cfg = _get_llm_config()
+    llm_status: dict = {
+        "provider": llm_cfg["provider"],
+        "model": llm_cfg["model"],
+        "base_url": llm_cfg["base_url"],
+        "configured": bool(llm_cfg["api_key"]),
+    }
+
+    # ── Embedding provider ──────────────────────────────────────
+    embedding_provider = os.getenv("EMBEDDING_PROVIDER", "local").strip().lower()
+    embedding_status: dict = {"provider": embedding_provider}
+
+    # ── ChromaDB ────────────────────────────────────────────────
+    chroma_status: dict = {"ok": False, "documents": 0}
+    try:
+        import chromadb
+        chroma_path = str(get_data_dir() / "chroma_episodes")
+        client = chromadb.PersistentClient(path=chroma_path)
+        collection = client.get_or_create_collection("episodes")
+        chroma_status = {"ok": True, "documents": collection.count()}
+    except Exception:
+        pass
+
+    # ── NetEase API ─────────────────────────────────────────────
+    netease_configured = bool(
+        os.getenv("NETEASE_API_BASE_URL", "").strip()
+        or os.getenv("NETEASE_COOKIE", "").strip()
+    )
+
     return {
         "ready": True,
-        "mcp_servers": mcp_servers,
-        "mcp_tools": mcp_tools,
+        "version": app.version,
+        "llm": llm_status,
+        "embedding": embedding_status,
+        "chromadb": chroma_status,
+        "netease": {"configured": netease_configured},
+        "mcp": {"servers": mcp_servers, "tools": mcp_tools},
     }

@@ -7,6 +7,7 @@ import os
 
 from backend.agent.llm_client import request_json_object
 from backend.agent.prompt_builder import build_memory_observer_messages
+from backend.data_config import get_data_dir, get_profiles_dir
 from backend.memory.profile_schema import (
     UserProfile,
     atomic_write_json,
@@ -27,14 +28,16 @@ class MemoryManager:
         env_path: Path | None = None,
         session_id: str = "default",
     ) -> None:
-        backend_root = Path(__file__).resolve().parents[1]
         if profile_path:
             self.profile_path = profile_path
-        elif session_id and session_id != "default":
-            self.profile_path = backend_root / "memory" / f"user_profile_{session_id}.json"
         else:
-            self.profile_path = backend_root / "memory" / "user_profile.json"
-        self.audit_log_path = backend_root / "memory" / "memory_update.log"
+            profiles_dir = get_profiles_dir()
+            profiles_dir.mkdir(parents=True, exist_ok=True)
+            if session_id and session_id != "default":
+                self.profile_path = profiles_dir / f"user_profile_{session_id}.json"
+            else:
+                self.profile_path = profiles_dir / "user_profile.json"
+        self.audit_log_path = get_data_dir() / "memory_update.log"
         self.session_id = session_id
 
     def get_profile(self) -> dict[str, Any]:

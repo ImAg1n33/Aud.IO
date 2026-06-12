@@ -23,10 +23,11 @@ def _get_llm_config(model_override: str | None = None) -> dict[str, str]:
 
     api_key = os.getenv("LLM_API_KEY", "").strip()
     if not api_key:
+        # Provider-specific fallback keys — only for OpenAI-compatible APIs.
+        # Anthropic uses the Messages API (not /chat/completions) and is not
+        # supported by this client.  Use LLM_API_KEY for all providers.
         if provider == "openai":
             api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        elif provider == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
         elif provider == "deepseek":
             api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
 

@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { usePlayerStore } from './player'
+import { SSEParser } from './sse-parser'
 
 // ── Internal: typewriter engine (hidden from components) ──
 
@@ -31,7 +32,7 @@ function resetTyping() {
   if (typeTimer) { clearInterval(typeTimer); typeTimer = null }
 }
 
-// ── Internal: SSE parser ──
+// ── Internal: SSE event handler ──
 
 function handleSSE(event, data, store, player) {
   switch (event) {
@@ -134,31 +135,15 @@ export const useChatStore = defineStore('chat', {
 
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
-        let buffer = ''
+        const parser = new SSEParser()
 
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
 
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = ''
-
-          let currentEvent = ''
-          let currentData = ''
-
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              currentEvent = line.slice(7).trim()
-            } else if (line.startsWith('data: ')) {
-              currentData += (currentData ? '\n' : '') + line.slice(6)
-            } else if (line === '' && currentEvent) {
-              handleSSE(currentEvent, currentData, this, player)
-              currentEvent = ''
-              currentData = ''
-            } else if (line !== '') {
-              buffer += line + '\n'
-            }
+          const chunk = decoder.decode(value, { stream: true })
+          for (const ev of parser.feed(chunk)) {
+            handleSSE(ev.event, ev.data, this, player)
           }
         }
       } catch (error) {

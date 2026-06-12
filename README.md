@@ -194,11 +194,11 @@ Aud.IO/
 
 | 维度 | 实践 |
 |------|------|
-| 测试 | pytest + pytest-asyncio，155 用例覆盖全部模块 |
+| 测试 | pytest + pytest-asyncio + Node test runner，170 用例覆盖全部模块 |
 | CI | GitHub Actions：Python 3.11 + 3.12 matrix，ruff lint 门禁，secret scan |
 | 安全 | Pre-commit Hook 拦截凭证提交，session_id 白名单校验，`.gitignore` 保护运行时数据 |
 | 容错 | LLM 流式中断优雅降级，版权歌曲自动换曲重试（最多 2 次），ChromaDB 降级到 SQLite，SSE 跨 chunk 鲁棒 |
-| 代码质量 | ruff All checks passed，零未使用导入，零死代码，源码与运行时数据分离 |
+| 代码质量 | ruff All checks passed，零未使用导入，零死代码，源码与运行时分离，`.env` 加载优先于服务初始化 |
 
 ---
 

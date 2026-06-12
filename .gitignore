@@ -40,5 +40,6 @@ docs/architecture-reports/
 # IDE (personal workspace settings, not portable)
 .vscode/
 
-# Claude Code (local workspace settings)
+# Claude Code / Codex (local workspace settings + agent skills)
 .claude/
+.agents/

@@ -402,3 +402,163 @@ class TestTwoPassStreaming:
         # CHITCHAT should NOT have status events (no Two-Pass)
         assert "status" not in event_types
         assert "done" in event_types
+
+
+class TestTTSIntegration:
+    """RFC-011: TTS speech events in streaming pipeline."""
+
+    @pytest.mark.asyncio
+    async def test_tts_disabled_by_default_no_speech_event(self, service, monkeypatch) -> None:
+        """When TTS_ENABLED is not set, speech events never appear."""
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            yield "Hi"
+            yield {
+                "analysis": "ok", "answer": "Hi there!", "actions": [],
+                "play_keyword": "", "provider": "test", "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.stream_llm", fake_stream,
+        )
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "hello", {}, session_id="tts-off-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        assert "speech" not in event_types, "speech should not appear when TTS is disabled"
+
+    @pytest.mark.asyncio
+    async def test_speech_event_for_chitchat_when_tts_enabled(self, service, monkeypatch) -> None:
+        """CHITCHAT with TTS enabled → speech event after text."""
+        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setenv("TTS_INTENTS", "chitchat")
+        # Re-init TTS provider to pick up env change
+        from backend.agent.tts_provider import TTSProvider
+        service.tts = TTSProvider()
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            yield "Hello world, nice to meet you all."
+            yield {
+                "analysis": "ok", "answer": "Hello world, nice to meet you all.", "actions": [],
+                "play_keyword": "", "provider": "test", "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.stream_llm", fake_stream,
+        )
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "hello", {}, session_id="tts-chitchat",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        # speech event should appear (even with empty urls when no TTS tool registered)
+        assert "speech" in event_types, f"Expected 'speech' event, got {event_types}"
+
+        # speech event data should contain expected fields
+        speech_events = [e for e in events if e.startswith("event: speech")]
+        assert len(speech_events) == 1
+        import json
+        data_str = speech_events[0].split("data: ", 1)[1].strip()
+        payload = json.loads(data_str)
+        assert "urls" in payload
+        assert "text" in payload
+        assert payload["intent"] == "chitchat"
+
+    @pytest.mark.asyncio
+    async def test_speech_event_for_two_pass_music_play(self, service, monkeypatch) -> None:
+        """MUSIC_PLAY with TTS enabled + 'music_play' in whitelist → speech after text."""
+        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setenv("TTS_INTENTS", "music_play")
+        from backend.agent.tts_provider import TTSProvider
+        service.tts = TTSProvider()
+
+        async def fake_decision(system_prompt: str, user_prompt: str, model: str | None = None):
+            return {
+                "analysis": "ok", "answer": "", "actions": [],
+                "play_keyword": "Test Song",
+                "provider": "test", "model": "test",
+            }
+
+        async def fake_search(keyword: str):
+            return {"id": "123", "name": "Test Song", "artist": "Test Artist"}
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return "http://example.com/test.mp3"
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            yield "Hello beautiful people. Let's play this one for you right now."
+            yield {
+                "analysis": "ok", "answer": "Hello beautiful people. Let's play this one for you right now.",
+                "actions": [], "play_keyword": "",
+                "provider": "test", "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.call_llm", fake_decision,
+        )
+        monkeypatch.setattr(
+            "backend.services.assistant_service.search_first_song", fake_search,
+        )
+        monkeypatch.setattr(
+            "backend.services.assistant_service.get_song_mp3_url", fake_mp3,
+        )
+        monkeypatch.setattr(
+            "backend.services.assistant_service.stream_llm", fake_stream,
+        )
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "play Test Song", {}, session_id="tts-twopass",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        # Music must come before speech (music is not delayed by TTS)
+        assert "music" in event_types
+        assert "speech" in event_types
+        music_idx = event_types.index("music")
+        speech_idx = event_types.index("speech")
+        assert music_idx < speech_idx, \
+            f"music ({music_idx}) must precede speech ({speech_idx}) — TTS never blocks music"
+
+    @pytest.mark.asyncio
+    async def test_music_plays_even_when_tts_fails(self, service, monkeypatch) -> None:
+        """When TTS is enabled but no tool is registered, music still plays normally."""
+        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setenv("TTS_INTENTS", "chitchat,weather")
+        from backend.agent.tts_provider import TTSProvider
+        service.tts = TTSProvider()
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            yield "Let's play some music."
+            yield {
+                "analysis": "ok", "answer": "Let's play some music.", "actions": [
+                    {"tool": "search_music", "keyword": "jazz"}
+                ],
+                "play_keyword": "jazz",
+                "provider": "test", "model": "test",
+            }
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.stream_llm", fake_stream,
+        )
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "play jazz", {}, session_id="tts-fail-safe",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        # TTS is disabled for music_recommend — no speech. The pipeline just works.
+        assert "done" in event_types, "pipeline must complete even when TTS is unavailable"

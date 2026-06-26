@@ -83,6 +83,7 @@ Streaming agent pipeline via **Server-Sent Events (SSE)**. Text tokens arrive in
 | `status` | `{"phase":"found","name":"...","artist":"..."}` | Song resolved, about to play |
 | `status` | `{"phase":"not_found"}` | Song not found, DJ breaks the news |
 | `music` | `{"song_id":"...","name":"...","artist":"...","mp3_url":"..."}` | Start playback immediately |
+| `speech` | `{"urls":["https://..."], "text":"...", "intent":"chitchat"}` | TTS audio URLs for voice output |
 | `token` | `"char"` | Single displayable character (typewriter feed) |
 | `text` | `"full assembled answer"` | Complete answer text (after streaming) |
 | `done` | `{"analysis":"...","answer":"...","music":{...}}` | Final structured reply (debug panel) |

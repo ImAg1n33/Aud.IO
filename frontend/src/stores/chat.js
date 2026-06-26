@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { usePlayerStore } from './player'
 import { SSEParser } from './sse-parser'
+import { enqueueSpeech, stopSpeech } from './speech-queue'
 
 // ── Internal: typewriter engine (hidden from components) ──
 
@@ -77,6 +78,15 @@ function handleSSE(event, data, store, player) {
       }
       break
 
+    case 'speech':
+      try {
+        const speech = JSON.parse(data)
+        enqueueSpeech(speech.urls, player.isPlaying)
+      } catch (e) {
+        console.error('Failed to parse speech data:', e)
+      }
+      break
+
     case 'done':
       try {
         const reply = JSON.parse(data)
@@ -117,8 +127,9 @@ export const useChatStore = defineStore('chat', {
       this.responseText = '> '
       resetTyping()
 
-      // Stop current playback before making a new request
+      // Stop current playback and speech before making a new request
       player.stopTrack()
+      stopSpeech()
 
       try {
         const response = await fetch('/api/v1/agent/respond/stream', {

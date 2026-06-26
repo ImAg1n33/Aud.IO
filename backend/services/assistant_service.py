@@ -37,6 +37,7 @@ from backend.agent.prompts import (
     build_retry_feedback,
 )
 from backend.agent.tool_executor import ToolExecutor
+from backend.agent.tts_provider import TTSProvider
 from backend.memory.embedding import EmbeddingProvider
 from backend.memory.episodic_memory import EpisodicMemory
 from backend.services.session_manager import SessionManager
@@ -63,6 +64,7 @@ class AssistantService:
         self.intent_classifier = IntentClassifier()
         self.tool_executor = ToolExecutor(max_retries=self.MAX_RETRIES)
         self.episodic_provider = EpisodicMemoryProvider(self.episodic_memory)
+        self.tts = TTSProvider()
 
     # ================================================================
     # Session helpers
@@ -251,6 +253,13 @@ class AssistantService:
 
                 yield self._sse("text", reply.get("answer", ""))
 
+                # TTS pre-roll tag — music is already playing, speech is non-blocking
+                speech_sse = await self._maybe_yield_speech(
+                    reply.get("answer", ""), intent.value, is_music_play=True,
+                )
+                if speech_sse:
+                    yield speech_sse
+
                 final_reply = {
                     **reply,
                     "music": song_data,
@@ -337,6 +346,13 @@ class AssistantService:
         if isinstance(music, dict) and music.get("song_id"):
             yield self._sse("music", json.dumps(music, ensure_ascii=False))
 
+        # TTS — for CHITCHAT/WEATHER this is the main audio output (no music)
+        speech_sse = await self._maybe_yield_speech(
+            final_reply.get("answer", ""), intent.value,
+        )
+        if speech_sse:
+            yield speech_sse
+
         # === RECORD ===
         played_song = final_reply.get("music")
         ctx.short_term_memory.add_turn(
@@ -405,6 +421,31 @@ class AssistantService:
     @staticmethod
     def _sse(event: str, data: str) -> str:
         return f"event: {event}\ndata: {data}\n\n"
+
+    async def _maybe_yield_speech(
+        self, answer_text: str, intent_str: str, is_music_play: bool = False,
+    ) -> str | None:
+        """Synthesize TTS speech and return the SSE string, or None on skip/fail.
+
+        MUSIC_PLAY: short pre-roll (≤80 chars).  CHITCHAT/WEATHER: full answer.
+        """
+        if not self.tts.is_enabled or not self.tts.intent_enabled(intent_str):
+            return None
+
+        text = (
+            self.tts.pre_roll_text(answer_text, max_len=80)
+            if is_music_play
+            else (answer_text or "").strip()
+        )
+        if not text:
+            return None
+
+        urls = await self.tts.synthesize(text)
+        return self._sse("speech", json.dumps({
+            "urls": urls,
+            "text": text,
+            "intent": intent_str,
+        }, ensure_ascii=False))
 
     def schedule_profile_update(
         self,

@@ -5,7 +5,7 @@
 # Aud.IO
 
 <p align="center">
-  <b>AI 音乐 DJ —— 懂你心情、记得你口味、陪你聊天的智能电台</b>
+  <b>AI 音乐 DJ —— 懂你心情、记得你口味、会开口说话的智能电台</b>
 </p>
 
 <p align="center">
@@ -40,8 +40,8 @@
       <p>受 Nothing 品牌美学启发的双模式界面——暗色模式的深邃哑光黑、亮色模式的通透冷白，三层视觉层级、无衬线字体、低饱和度色彩，让音乐成为唯一的焦点。</p>
     </td>
     <td>
-      <h3>⚡ 流式响应 + 容错</h3>
-      <p>基于 SSE 的逐字流式输出，配合 Web Audio API 的淡入淡出过渡。连接中断自动重试，版权歌曲自动换曲，ChromaDB 不可用时自动降级到 SQLite。</p>
+      <h3>🎙️ 语音 DJ + 容错</h3>
+      <p>基于 SSE 的逐字流式输出 + 可选 TTS 语音播报（通过 MCP 挂载外部服务）。音乐先响，语音不阻塞。Web Audio API 淡入淡出过渡，连接中断自动重试，版权歌曲自动换曲，ChromaDB 降级 SQLite。</p>
     </td>
   </tr>
 </table>
@@ -63,8 +63,9 @@
 
 | 层 | 技术选型 | 为什么 |
 |----|----------|--------|
-| 前端 | Vue 3 + Pinia + Vite 8 | SPA，4 组件拆分，Web Audio API，手写 CSS，SSE 状态机解析 |
+| 前端 | Vue 3 + Pinia + Vite 8 | SPA，4 组件拆分，Web Audio API，手写 CSS，SSE 状态机解析，语音播放队列 |
 | 后端 | FastAPI + Uvicorn | 异步原生支持，SSE 流式零额外开销，全链路 session 隔离 |
+| TTS | MCP → ToolRegistry → TTSProvider | 外部服务挂载，ToolRegistry 查找，音乐不等待语音 |
 | LLM | DeepSeek（OpenAI 兼容协议） | 5 条调用路径，System Role 规范，分层 Prompt |
 | 向量记忆 | ChromaDB + ONNX all-MiniLM-L6-v2 | 完全本地离线，~80MB 模型，首次自动下载 |
 | SQL 记忆 | SQLite | 双写兼容，SQL 聚合统计，语义检索降级回退 |

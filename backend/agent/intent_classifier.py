@@ -7,24 +7,24 @@ eliminating song-title-vs-emotion ambiguity for phrases like "来一首嫉妒".
 import asyncio
 import json
 import logging
-import os
 from enum import Enum
 from typing import Any, ClassVar
 
 import httpx
 from backend.agent.prompts import INTENT_CLASSIFIER_SYSTEM
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── LLM config ──
+# ── LLM config（集中式配置，P2-2） ──
 
 _CLASSIFY_TIMEOUT = 1.5
-_CLASSIFY_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek").strip().lower()
-_CLASSIFY_MODEL = os.getenv("LLM_MODEL", "").strip() or "deepseek-v4-flash"
-_CLASSIFY_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
+_CLASSIFY_PROVIDER = settings.llm_provider.strip().lower()
+_CLASSIFY_MODEL = settings.llm_model.strip() or "deepseek-v4-flash"
+_CLASSIFY_BASE_URL = settings.llm_base_url.strip()
 _CLASSIFY_API_KEY = (
-    os.getenv("LLM_API_KEY", "").strip()
-    or os.getenv("DEEPSEEK_API_KEY", "").strip()
+    settings.llm_api_key.strip()
+    or settings.deepseek_api_key.strip()
 )
 
 
@@ -102,11 +102,9 @@ class IntentClassifier:
                 {"role": "user", "content": user_input},
             ],
         }
-        # deepseek-v4-flash 是推理模型——不关 thinking 的话 10 token 全被思考吃掉，
+        # deepseek 推理模型——不关 thinking 的话 10 token 全被思考吃掉，
         # JSON 永远解析失败，LLM 意图分类退化为纯关键词兜底
-        if _CLASSIFY_PROVIDER == "deepseek" and (
-            os.getenv("LLM_DISABLE_THINKING", "true").strip().lower() != "false"
-        ):
+        if _CLASSIFY_PROVIDER == "deepseek" and settings.llm_disable_thinking:
             body["thinking"] = {"type": "disabled"}
 
         async with httpx.AsyncClient(timeout=_CLASSIFY_TIMEOUT) as client:

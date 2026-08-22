@@ -3,10 +3,10 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
-import os
 
 from backend.agent.llm_client import request_json_object
 from backend.agent.prompt_builder import build_memory_observer_messages
+from backend.config import settings
 from backend.data_config import get_data_dir, get_profiles_dir
 from backend.memory.profile_schema import (
     UserProfile,
@@ -18,7 +18,7 @@ from backend.memory.profile_schema import (
 
 
 logger = logging.getLogger(__name__)
-SLOW_CRITIC_MODEL = os.getenv("MEMORY_MODEL", "").strip()
+SLOW_CRITIC_MODEL = settings.memory_model.strip()
 
 
 class MemoryManager:

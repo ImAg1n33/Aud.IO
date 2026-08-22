@@ -1,6 +1,7 @@
 import pytest
 
 from backend.agent.tts_provider import TTSProvider
+from backend.config import settings
 
 
 class TestSegmentation:
@@ -66,7 +67,7 @@ class TestPreRollText:
     """pre_roll_text() — first-sentence extraction for DJ short tag."""
 
     def test_returns_first_sentence(self, monkeypatch) -> None:
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
         provider = TTSProvider()
         result = provider.pre_roll_text(
             "Hello beautiful people. Today is rainy. Let's play some jazz."
@@ -74,7 +75,7 @@ class TestPreRollText:
         assert result == "Hello beautiful people"
 
     def test_respects_max_len(self, monkeypatch) -> None:
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
         provider = TTSProvider()
         result = provider.pre_roll_text(
             "A" * 50 + " " + "B" * 50 + ". " + "C" * 50, max_len=80,
@@ -83,13 +84,13 @@ class TestPreRollText:
         assert len(result) <= 80
 
     def test_returns_none_for_short_text(self, monkeypatch) -> None:
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
         provider = TTSProvider()
         assert provider.pre_roll_text("Hi") is None
         assert provider.pre_roll_text("  Hello.  ") is None  # 5 chars stripped
 
     def test_returns_none_for_empty(self, monkeypatch) -> None:
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
         provider = TTSProvider()
         assert provider.pre_roll_text("") is None
         assert provider.pre_roll_text(None) is None
@@ -108,7 +109,7 @@ class TestFeatureGates:
         assert provider.is_enabled is False
 
     def test_enabled_when_env_is_true(self, monkeypatch) -> None:
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
         provider = TTSProvider()
         assert provider.is_enabled is True
 
@@ -123,7 +124,7 @@ class TestFeatureGates:
         assert provider.intent_enabled("music_recommend") is False
 
     def test_custom_intents_from_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("TTS_INTENTS", "chitchat,music_play")
+        monkeypatch.setattr(settings, "tts_intents", "chitchat,music_play")
         provider = TTSProvider()
         assert provider.intent_enabled("chitchat") is True
         assert provider.intent_enabled("music_play") is True
@@ -141,14 +142,14 @@ class TestSynthesize:
 
     @pytest.mark.asyncio
     async def test_returns_empty_for_empty_text(self, monkeypatch) -> None:
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
         provider = TTSProvider()
         assert await provider.synthesize("") == []
         assert await provider.synthesize("   ") == []
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_tool_not_registered(self, monkeypatch) -> None:
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
         provider = TTSProvider(tool_name="nonexistent_tts")
         result = await provider.synthesize("Hello.")
         assert result == []
@@ -157,7 +158,7 @@ class TestSynthesize:
     async def test_calls_tool_and_returns_urls(self, monkeypatch) -> None:
         from backend.tools.base import BaseTool, ToolResult, tool_registry
 
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
 
         class FakeTTSTool(BaseTool):
             name = "fake_tts"
@@ -182,7 +183,7 @@ class TestSynthesize:
     async def test_skips_failed_segment_continues_next(self, monkeypatch) -> None:
         from backend.tools.base import BaseTool, ToolResult, ToolExecutionError, tool_registry
 
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
         call_count = 0
 
         class FlakyTTSTool(BaseTool):
@@ -211,7 +212,7 @@ class TestSynthesize:
     async def test_returns_empty_when_tool_times_out(self, monkeypatch) -> None:
         from backend.tools.base import BaseTool, ToolResult, tool_registry
 
-        monkeypatch.setenv("TTS_ENABLED", "true")
+        monkeypatch.setattr(settings, "tts_enabled", True)
 
         class SlowTTSTool(BaseTool):
             name = "slow_tts"

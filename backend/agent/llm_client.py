@@ -2,34 +2,67 @@
 
 v0.4 (RFC-007): System prompt sent as role="system" (not concatenated into user message).
 Callers pass system_prompt and user_prompt separately.
+P2-1: 每次调用写入结构化日志（data/llm_calls.jsonl），供 /ready 指标与排查使用。
 """
 
 import json
 import logging
-import os
+import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
 import httpx
 
+from backend.config import settings
+
 logger = logging.getLogger(__name__)
 
 
-def _get_llm_config(model_override: str | None = None) -> dict[str, str]:
-    provider = os.getenv("LLM_PROVIDER", "deepseek").strip().lower()
-    configured_model = os.getenv("LLM_MODEL", "").strip()
-    model = model_override.strip() if isinstance(model_override, str) and model_override.strip() else configured_model
-    base_url = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
+def _log_llm_call(
+    provider: str, model: str, endpoint: str,
+    latency_ms: float, ok: bool, stream: bool,
+    input_chars: int = 0, output_chars: int = 0,
+    note: str = "",
+) -> None:
+    """结构化记录一次 LLM 调用（JSONL 追加，失败只告警——日志绝不影响主流程）。"""
+    try:
+        from backend.data_config import get_data_dir
 
-    api_key = os.getenv("LLM_API_KEY", "").strip()
+        log_dir = get_data_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.time(),
+            "provider": provider,
+            "model": model,
+            "endpoint": endpoint,
+            "latency_ms": round(latency_ms, 1),
+            "ok": ok,
+            "stream": stream,
+            "input_chars": input_chars,
+            "output_chars": output_chars,
+            "note": note,
+        }
+        with (log_dir / "llm_calls.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.warning("LLM 调用日志写入失败（不影响主流程）: %s", exc)
+
+
+def _get_llm_config(model_override: str | None = None) -> dict[str, str]:
+    provider = settings.llm_provider.strip().lower()
+    configured_model = settings.llm_model.strip()
+    model = model_override.strip() if isinstance(model_override, str) and model_override.strip() else configured_model
+    base_url = settings.llm_base_url.strip()
+
+    api_key = settings.llm_api_key.strip()
     if not api_key:
         # Provider-specific fallback keys — only for OpenAI-compatible APIs.
         # Anthropic uses the Messages API (not /chat/completions) and is not
         # supported by this client.  Use LLM_API_KEY for all providers.
         if provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            api_key = settings.openai_api_key.strip()
         elif provider == "deepseek":
-            api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+            api_key = settings.deepseek_api_key.strip()
 
     return {
         "provider": provider,
@@ -48,10 +81,8 @@ def _provider_extra_body(provider: str) -> dict[str, Any]:
     其他 OpenAI 兼容 provider 会拒绝未知参数，因此仅对 deepseek 生效；
     LLM_DISABLE_THINKING=false 可关闭（兼容不支持该参数的老 deepseek 模型）。
     """
-    if provider == "deepseek":
-        disable = os.getenv("LLM_DISABLE_THINKING", "true").strip().lower() != "false"
-        if disable:
-            return {"thinking": {"type": "disabled"}}
+    if provider == "deepseek" and settings.llm_disable_thinking:
+        return {"thinking": {"type": "disabled"}}
     return {}
 
 
@@ -83,6 +114,60 @@ def _tool_calls_to_actions(tool_calls: list[Any]) -> list[dict[str, Any]]:
     return actions
 
 
+async def _request_chat_plain(
+    config: dict[str, str],
+    messages: list[dict[str, str]],
+    temperature: float,
+    timeout: float = 30.0,
+) -> str:
+    """Non-streaming chat completion WITHOUT response_format=json_object.
+
+    供 call_llm 的自然语言路径使用——NON_STREAMING_SYSTEM 重构后要求纯文本回答，
+    若仍强制 json_object，模型会把整段回答包进 JSON 键（{"message": "..."}），
+    下游按 answer 键解析得到空串（回归: step-4 重构）。
+    JSON 消费者（memory observer / reflection）走 _request_chat_json，不受影响。
+    """
+    endpoint = f"{config['base_url'].rstrip('/')}/chat/completions"
+    body = {
+        "model": config["model"],
+        "temperature": temperature,
+        "max_tokens": 600,
+        "messages": messages,
+        **_provider_extra_body(config["provider"]),
+    }
+
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                endpoint,
+                json=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config['api_key']}",
+                },
+            )
+            response.raise_for_status()
+            completion = response.json()
+    except Exception as exc:
+        _log_llm_call(
+            config["provider"], config["model"], endpoint,
+            (time.monotonic() - start) * 1000, False, False,
+            input_chars=sum(len(m.get("content", "")) for m in messages),
+            note=f"{type(exc).__name__}",
+        )
+        raise
+
+    content = completion["choices"][0]["message"].get("content") or ""
+    _log_llm_call(
+        config["provider"], config["model"], endpoint,
+        (time.monotonic() - start) * 1000, True, False,
+        input_chars=sum(len(m.get("content", "")) for m in messages),
+        output_chars=len(str(content)),
+    )
+    return str(content)
+
+
 async def _request_chat_json(
     config: dict[str, str],
     messages: list[dict[str, str]],
@@ -99,17 +184,33 @@ async def _request_chat_json(
         **_provider_extra_body(config["provider"]),
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            endpoint,
-            json=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {config['api_key']}",
-            },
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                endpoint,
+                json=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config['api_key']}",
+                },
+            )
+            response.raise_for_status()
+            completion = response.json()
+    except Exception as exc:
+        _log_llm_call(
+            config["provider"], config["model"], endpoint,
+            (time.monotonic() - start) * 1000, False, False,
+            input_chars=sum(len(m.get("content", "")) for m in messages),
+            note=f"{type(exc).__name__}",
         )
-        response.raise_for_status()
-        completion = response.json()
+        raise
+    _log_llm_call(
+        config["provider"], config["model"], endpoint,
+        (time.monotonic() - start) * 1000, True, False,
+        input_chars=sum(len(m.get("content", "")) for m in messages),
+        output_chars=len(str(completion.get("choices", [{}])[0].get("message", {}).get("content", ""))),
+    )
     content = completion["choices"][0]["message"]["content"]
     return _extract_json(content)
 
@@ -238,8 +339,14 @@ async def call_llm(
                 "play_keyword": "",
             }
         else:
-            parsed = await _request_chat_json(config, messages, temperature=0.2)
-            payload = parsed
+            # 自然语言路径——绝不用 json_object（见 _request_chat_plain 注释）
+            content = await _request_chat_plain(config, messages, temperature=0.2)
+            payload = {
+                "analysis": "",
+                "answer": content or "",
+                "actions": [],
+                "play_keyword": "",
+            }
         return _normalize_response(payload, config["provider"], config["model"])
     except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError, json.JSONDecodeError) as exc:
         return {
@@ -275,21 +382,38 @@ async def _request_chat_with_tools(
         **_provider_extra_body(config["provider"]),
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            endpoint,
-            json=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {config['api_key']}",
-            },
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                endpoint,
+                json=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config['api_key']}",
+                },
+            )
+            response.raise_for_status()
+            completion = response.json()
+    except Exception as exc:
+        _log_llm_call(
+            config["provider"], config["model"], endpoint,
+            (time.monotonic() - start) * 1000, False, False,
+            input_chars=sum(len(m.get("content", "")) for m in messages),
+            note=f"{type(exc).__name__}",
         )
-        response.raise_for_status()
-        completion = response.json()
+        raise
 
     message = completion["choices"][0]["message"]
     content = message.get("content") or ""
     tool_calls = message.get("tool_calls") or []
+    _log_llm_call(
+        config["provider"], config["model"], endpoint,
+        (time.monotonic() - start) * 1000, True, False,
+        input_chars=sum(len(m.get("content", "")) for m in messages),
+        output_chars=len(str(content)),
+        note=f"tool_calls={len(tool_calls)}",
+    )
     return str(content), list(tool_calls)
 
 
@@ -354,6 +478,7 @@ async def stream_llm(
         full_content = ""
         tool_calls_acc: dict[int, dict[str, Any]] = {}
         connection_ok = False
+        start = time.monotonic()
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -410,6 +535,13 @@ async def stream_llm(
             normalized["answer"] = full_content
             normalized["actions"] = _tool_calls_to_actions(raw_tool_calls)
             normalized["stream_interrupted"] = False
+            _log_llm_call(
+                config["provider"], config["model"], endpoint,
+                (time.monotonic() - start) * 1000, True, True,
+                input_chars=len(system_prompt) + len(user_prompt),
+                output_chars=len(full_content),
+                note=f"tool_calls={len(raw_tool_calls)}",
+            )
             yield normalized
             return
 
@@ -421,6 +553,12 @@ async def stream_llm(
                 )
                 continue
 
+            _log_llm_call(
+                config["provider"], config["model"], endpoint,
+                (time.monotonic() - start) * 1000, False, True,
+                input_chars=len(system_prompt) + len(user_prompt),
+                note=f"{type(exc).__name__}",
+            )
             yield {
                 "analysis": "Model call failed.",
                 "answer": (

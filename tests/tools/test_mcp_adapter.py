@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from backend.config import settings
 from backend.tools.base import ToolResult, tool_registry
 from backend.tools.mcp_adapter import (
     MCPClientManager,
@@ -72,18 +73,18 @@ class TestMCPToolAdapter:
 
 class TestLoadMCPConfigs:
     def test_empty_when_unset(self, monkeypatch):
-        monkeypatch.delenv("MCP_SERVERS", raising=False)
+        monkeypatch.setattr(settings, "mcp_servers", "")
         assert load_mcp_configs() == []
 
     def test_empty_json_array(self, monkeypatch):
-        monkeypatch.setenv("MCP_SERVERS", "[]")
+        monkeypatch.setattr(settings, "mcp_servers", "[]")
         assert load_mcp_configs() == []
 
     def test_parses_valid_config(self, monkeypatch):
         cfg = json.dumps([
             {"name": "w", "transport": "stdio", "command": "npx", "args": ["-y", "x"]}
         ])
-        monkeypatch.setenv("MCP_SERVERS", cfg)
+        monkeypatch.setattr(settings, "mcp_servers", cfg)
         configs = load_mcp_configs()
         assert len(configs) == 1
         assert configs[0]["name"] == "w"
@@ -93,17 +94,17 @@ class TestLoadMCPConfigs:
             {"name": "w1", "command": "x", "enabled": False},
             {"name": "w2", "command": "y"},
         ])
-        monkeypatch.setenv("MCP_SERVERS", cfg)
+        monkeypatch.setattr(settings, "mcp_servers", cfg)
         configs = load_mcp_configs()
         assert len(configs) == 1
         assert configs[0]["name"] == "w2"
 
     def test_invalid_json_returns_empty(self, monkeypatch):
-        monkeypatch.setenv("MCP_SERVERS", "{not json}")
+        monkeypatch.setattr(settings, "mcp_servers", "{not json}")
         assert load_mcp_configs() == []
 
     def test_non_array_returns_empty(self, monkeypatch):
-        monkeypatch.setenv("MCP_SERVERS", '{"name": "x"}')
+        monkeypatch.setattr(settings, "mcp_servers", '{"name": "x"}')
         assert load_mcp_configs() == []
 
 

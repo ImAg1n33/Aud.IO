@@ -1,4 +1,8 @@
-"""LLM 客户端配置测试 —— 推理模型 thinking 禁用 + function calling 重构。"""
+"""LLM 客户端配置测试 —— 推理模型 thinking 禁用 + function calling 重构。
+
+注意：模块读取 settings 单例（P2-2 配置集中），测试用
+monkeypatch.setattr(settings, ...) 而非 setenv。
+"""
 
 from backend.agent.llm_client import (
     _get_llm_config,
@@ -6,6 +10,7 @@ from backend.agent.llm_client import (
     _provider_extra_body,
     _tool_calls_to_actions,
 )
+from backend.config import settings
 
 
 class TestProviderExtraBody:
@@ -13,7 +18,7 @@ class TestProviderExtraBody:
         assert _provider_extra_body("deepseek") == {"thinking": {"type": "disabled"}}
 
     def test_deepseek_thinking_disable_off(self, monkeypatch) -> None:
-        monkeypatch.setenv("LLM_DISABLE_THINKING", "false")
+        monkeypatch.setattr(settings, "llm_disable_thinking", False)
         assert _provider_extra_body("deepseek") == {}
 
     def test_openai_gets_no_extra_body(self) -> None:
@@ -25,14 +30,14 @@ class TestProviderExtraBody:
 
 class TestLlMConfig:
     def test_config_includes_provider(self, monkeypatch) -> None:
-        monkeypatch.setenv("LLM_PROVIDER", "deepseek")
-        monkeypatch.setenv("LLM_MODEL", "deepseek-v4-flash")
+        monkeypatch.setattr(settings, "llm_provider", "deepseek")
+        monkeypatch.setattr(settings, "llm_model", "deepseek-v4-flash")
         config = _get_llm_config()
         assert config["provider"] == "deepseek"
         assert config["model"] == "deepseek-v4-flash"
 
     def test_model_override_wins(self, monkeypatch) -> None:
-        monkeypatch.setenv("LLM_MODEL", "base-model")
+        monkeypatch.setattr(settings, "llm_model", "base-model")
         config = _get_llm_config(model_override="override-model")
         assert config["model"] == "override-model"
 

@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from fastapi import BackgroundTasks
 
+from backend.config import settings
 from backend.services.assistant_service import AssistantService
 
 
@@ -196,7 +197,7 @@ class TestBuildToolSchemas:
         from backend.agent.intent_classifier import Intent
 
         self._ensure_music_tools_registered()
-        monkeypatch.setenv("NETEASE_COOKIE", "test-cookie")
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
         schemas = service._build_tool_schemas(Intent.MUSIC_PLAY)
         names = {s["function"]["name"] for s in schemas}
         assert "search_music" in names
@@ -212,7 +213,7 @@ class TestBuildToolSchemas:
         from backend.agent.intent_classifier import Intent
 
         self._ensure_music_tools_registered()
-        monkeypatch.setenv("NETEASE_COOKIE", "test-cookie")
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
         schemas = service._build_tool_schemas(Intent.UNKNOWN)
         assert len(schemas) >= 2  # 音乐工具（无 cookie 时为空，有 cookie 时 ≥2）
 
@@ -475,8 +476,8 @@ class TestTTSIntegration:
     @pytest.mark.asyncio
     async def test_speech_event_for_chitchat_when_tts_enabled(self, service, monkeypatch) -> None:
         """CHITCHAT with TTS enabled → speech event after text."""
-        monkeypatch.setenv("TTS_ENABLED", "true")
-        monkeypatch.setenv("TTS_INTENTS", "chitchat")
+        monkeypatch.setattr(settings, "tts_enabled", True)
+        monkeypatch.setattr(settings, "tts_intents", "chitchat")
         # Re-init TTS provider to pick up env change
         from backend.agent.tts_provider import TTSProvider
         service.tts = TTSProvider()
@@ -516,8 +517,8 @@ class TestTTSIntegration:
     @pytest.mark.asyncio
     async def test_speech_event_for_two_pass_music_play(self, service, monkeypatch) -> None:
         """MUSIC_PLAY with TTS enabled + 'music_play' in whitelist → speech after text."""
-        monkeypatch.setenv("TTS_ENABLED", "true")
-        monkeypatch.setenv("TTS_INTENTS", "music_play")
+        monkeypatch.setattr(settings, "tts_enabled", True)
+        monkeypatch.setattr(settings, "tts_intents", "music_play")
         from backend.agent.tts_provider import TTSProvider
         service.tts = TTSProvider()
 
@@ -574,8 +575,8 @@ class TestTTSIntegration:
     @pytest.mark.asyncio
     async def test_music_plays_even_when_tts_fails(self, service, monkeypatch) -> None:
         """When TTS is enabled but no tool is registered, music still plays normally."""
-        monkeypatch.setenv("TTS_ENABLED", "true")
-        monkeypatch.setenv("TTS_INTENTS", "chitchat,weather")
+        monkeypatch.setattr(settings, "tts_enabled", True)
+        monkeypatch.setattr(settings, "tts_intents", "chitchat,weather")
         from backend.agent.tts_provider import TTSProvider
         service.tts = TTSProvider()
 

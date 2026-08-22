@@ -2,28 +2,19 @@
 
 设计理念：
 - 默认使用 ChromaDB 内置的 ONNX all-MiniLM-L6-v2 模型（完全离线，零网络依赖）
+- fastembed 模式提供中文优化 BGE 模型（推荐：EMBEDDING_PROVIDER=fastembed）
 - 可选通过 API 端点使用 OpenAI 兼容的远端 Embedding 服务
 - 统一异步接口，方便在 store_snapshot / query_by_semantic 中无缝切换
-
-使用示例:
-    # 离线模式（默认，首次运行会自动下载 ~80MB ONNX 模型）
-    provider = ChromaLocalEmbedding()
-
-    # API 模式
-    provider = APIEmbedding(
-        base_url="https://api.deepseek.com",
-        api_key="sk-xxx",
-        model="text-embedding-3-small",
-    )
 """
 
 import asyncio
 import logging
-import os
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar
 
 import httpx
+
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -141,11 +132,11 @@ class APIEmbedding(EmbeddingProvider):
             model: Embedding 模型名（默认从 EMBEDDING_MODEL 环境变量读取，
                    最终 fallback 为 text-embedding-3-small）
         """
-        self._base_url = (base_url or os.getenv("LLM_BASE_URL", "https://api.deepseek.com")).rstrip("/")
-        self._api_key = api_key or os.getenv("LLM_API_KEY", "") or os.getenv("DEEPSEEK_API_KEY", "")
+        self._base_url = (base_url or settings.llm_base_url).rstrip("/")
+        self._api_key = api_key or settings.llm_api_key or settings.deepseek_api_key
         self._model = (
             model
-            or os.getenv("EMBEDDING_MODEL", "").strip()
+            or settings.embedding_model.strip()
             or "text-embedding-3-small"
         )
         self.dimension = self._KNOWN_DIMS.get(self._model, 1536)
@@ -210,7 +201,7 @@ class FastEmbedProvider(EmbeddingProvider):
     }
 
     def __init__(self, model: str | None = None) -> None:
-        self.model = model or os.getenv("EMBEDDING_LOCAL_MODEL", "").strip() or "BAAI/bge-small-zh-v1.5"
+        self.model = model or settings.embedding_local_model.strip() or "BAAI/bge-small-zh-v1.5"
         self.dimension: int = self._KNOWN_DIMS.get(self.model, 0)
         self._model_obj: Any | None = None
 
@@ -250,19 +241,19 @@ def create_embedding_provider() -> EmbeddingProvider:
        EMBEDDING_LOCAL_MODEL 指定，默认 BAAI/bge-small-zh-v1.5）
     3. 其他/默认 → ChromaLocalEmbedding（本地 ONNX MiniLM，向后兼容）
 
-    环境变量参考:
+    环境变量参考（集中式配置 backend/config.py）:
         EMBEDDING_PROVIDER=api|fastembed|local   (默认: local)
         EMBEDDING_MODEL=xxx                      (仅 api 模式)
         EMBEDDING_LOCAL_MODEL=xxx                (仅 fastembed 模式)
     """
-    provider_kind = os.getenv("EMBEDDING_PROVIDER", "local").strip().lower()
+    provider_kind = settings.embedding_provider.strip().lower()
 
     if provider_kind == "api":
         logger.info("使用远端 API Embedding provider")
         return APIEmbedding()
 
     if provider_kind == "fastembed":
-        logger.info("使用 FastEmbed 本地 BGE provider (%s)", os.getenv("EMBEDDING_LOCAL_MODEL", "BAAI/bge-small-zh-v1.5"))
+        logger.info("使用 FastEmbed 本地 BGE provider (%s)", settings.embedding_local_model or "BAAI/bge-small-zh-v1.5")
         return FastEmbedProvider()
 
     logger.info("使用本地 ChromaDB ONNX Embedding provider (all-MiniLM-L6-v2)")

@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from backend.config import settings
 from backend.tools.base import BaseTool, ToolExecutionError, ToolResult, tool_registry
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 def load_mcp_configs() -> list[dict[str, Any]]:
     """Parse MCP_SERVERS env var into validated config dicts."""
-    raw = os.getenv("MCP_SERVERS", "").strip()
+    raw = settings.mcp_servers.strip()
     if not raw or raw == "[]":
         return []
 

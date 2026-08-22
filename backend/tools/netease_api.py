@@ -5,10 +5,11 @@ v0.3: urllib → httpx + Cookie expiry detection + transient retry.
 
 import json
 import logging
-import os
 from typing import Any
 
 import httpx
+
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +27,12 @@ class CookieExpiredError(NetEaseError):
 
 
 def _get_base_url() -> str:
-    configured = os.getenv("NETEASE_API_BASE_URL", "").strip().rstrip("/")
+    configured = settings.netease_api_base_url.strip().rstrip("/")
     return configured or DEFAULT_BASE_URL
 
 
 def _get_cookie() -> str:
-    return os.getenv("NETEASE_COOKIE", "").strip()
+    return settings.netease_cookie.strip()
 
 
 # ================================================================

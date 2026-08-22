@@ -6,10 +6,10 @@ speed is the highest priority — TTS must never delay it.
 
 import asyncio
 import logging
-import os
 import re
 from typing import Any
 
+from backend.config import settings
 from backend.tools.base import ToolNotFoundError, tool_registry
 
 logger = logging.getLogger(__name__)
@@ -27,17 +27,16 @@ class TTSProvider:
     """
 
     def __init__(self, tool_name: str | None = None) -> None:
-        self._tool_name = tool_name or os.getenv("TTS_TOOL_NAME", "tts_synthesize").strip()
+        self._tool_name = tool_name or settings.tts_tool_name.strip()
 
     # ── feature gates ──────────────────────────────────────────────
 
     @property
     def is_enabled(self) -> bool:
-        return os.getenv("TTS_ENABLED", "false").strip().lower() == "true"
+        return settings.tts_enabled
 
     def intent_enabled(self, intent: str) -> bool:
-        raw = os.getenv("TTS_INTENTS", "chitchat,weather").strip()
-        allowed = {x.strip() for x in raw.split(",") if x.strip()}
+        allowed = {x.strip() for x in settings.tts_intents.split(",") if x.strip()}
         return intent in allowed
 
     # ── public API ──────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 """NetEase Cloud Music tools implementing the BaseTool protocol."""
 
-import os
 from typing import Any
 
+from backend.config import settings
 from backend.tools.base import (
     BaseTool,
     MusicCopyrightError,
@@ -34,7 +34,7 @@ class SearchMusicTool(BaseTool):
     }
 
     def is_available(self) -> bool:
-        return bool(os.getenv("NETEASE_COOKIE", "").strip())
+        return bool(settings.netease_cookie.strip())
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         keyword = str(kwargs.get("keyword", "")).strip()
@@ -85,7 +85,7 @@ class GetMusicUrlTool(BaseTool):
     }
 
     def is_available(self) -> bool:
-        return bool(os.getenv("NETEASE_COOKIE", "").strip())
+        return bool(settings.netease_cookie.strip())
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         song_id = str(kwargs.get("song_id", "")).strip()

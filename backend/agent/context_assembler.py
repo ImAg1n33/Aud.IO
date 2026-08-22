@@ -7,7 +7,6 @@ schema) are handled by callers via prompts.py and sent as role="system".
 import asyncio
 import json
 import logging
-import os
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -17,6 +16,7 @@ import httpx
 from backend.agent.intent_classifier import Intent
 from backend.agent.memory_manager import MemoryManager
 from backend.agent.prompts import format_resolved_song
+from backend.config import settings
 from backend.memory.conversation_memory import ConversationMemory
 from backend.memory.episodic_memory import EpisodicMemory, EpisodicSnapshot
 from backend.tools.base import tool_registry
@@ -127,7 +127,7 @@ async def _fetch_weather(city: str) -> str:
 async def _get_weather_cached() -> str:
     now = time.monotonic()
     stale = (now - _weather_cache["ts"]) >= _WEATHER_CACHE_TTL
-    city = os.getenv("WEATHER_CITY", "").strip()
+    city = settings.weather_city.strip()
 
     if not _weather_cache["data"]:
         asyncio.ensure_future(_refresh_weather(city))

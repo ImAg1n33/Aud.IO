@@ -1,14 +1,16 @@
-import os
 from pathlib import Path
+
+from backend.config import settings
 
 
 def get_data_dir() -> Path:
     """Resolve the runtime data directory.
 
-    Controlled by AUD_IO_DATA_DIR env var. Defaults to <project_root>/backend/data/.
+    Controlled by AUD_IO_DATA_DIR env var (via centralized Settings).
+    Defaults to <project_root>/backend/data/.
     """
-    if env := os.getenv("AUD_IO_DATA_DIR", "").strip():
-        return Path(env).resolve()
+    if settings.aud_io_data_dir.strip():
+        return Path(settings.aud_io_data_dir).resolve()
     backend_root = Path(__file__).resolve().parent
     return backend_root / "data"
 

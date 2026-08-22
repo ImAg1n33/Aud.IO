@@ -137,6 +137,16 @@ v0: CREATE TABLE episodes (...) + indexes
 v1: ALTER TABLE ADD COLUMN session_id  (multi-user isolation)
     + ChromaDB metadata backfill
 v2: ALTER TABLE ADD COLUMN importance_score / access_count / last_accessed
+v3: ALTER TABLE ADD COLUMN song_id + feedback fields (played_to_completion, listen_duration, play_count, skip_count, last_feedback)
+v4: Self-healing repair — ensures all expected columns exist (historic DBs with incomplete migration state)
+v5: session_summaries table (Reflection cross-session memory)
 ```
 
 Migrations run on `EpisodicMemory.__init__()`, are idempotent, and execute in version order.
+
+## Deployment Constraints
+
+> ⚠️ **不要用多 worker 跑 uvicorn**（`--workers 2+` / `--reload` 仅限单进程开发模式）。
+> 内嵌 ChromaDB PersistentClient 对同一数据目录持文件锁，多进程并发会锁冲突崩溃。
+> 当前架构设计为**单进程单用户**（`routes_agent.py` 的 import-time 单例 + 内存 TTLCache 会话池），
+> 需要多用户/多进程时再引入外部向量库（pgvector/Qdrant）与服务化会话存储。

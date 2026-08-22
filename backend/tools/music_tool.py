@@ -16,6 +16,7 @@ from backend.tools.netease_api import CookieExpiredError, get_song_mp3_url, sear
 
 class SearchMusicTool(BaseTool):
     name = "search_music"
+    category = "music"
     description = (
         "Search NetEase Cloud Music for a song by keyword. "
         "Returns the best match with song id, name, and artist. "
@@ -67,6 +68,7 @@ class SearchMusicTool(BaseTool):
 
 class GetMusicUrlTool(BaseTool):
     name = "get_music_url"
+    category = "music"
     description = (
         "Get a playable MP3 URL for a song by its NetEase song ID. "
         "Returns the direct audio URL. May fail with copyright restrictions."

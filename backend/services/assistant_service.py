@@ -19,6 +19,7 @@ from backend.agent.context_assembler import (
     CurrentlyPlayingProvider,
     EnvironmentProvider,
     EpisodicMemoryProvider,
+    SessionSummaryProvider,
     ToolSchemaProvider,
     UserPreferenceProvider,
 )
@@ -40,6 +41,7 @@ from backend.agent.tool_executor import ToolExecutor
 from backend.agent.tts_provider import TTSProvider
 from backend.memory.embedding import EmbeddingProvider
 from backend.memory.episodic_memory import EpisodicMemory
+from backend.memory.reflection import SessionReflector
 from backend.services.session_manager import SessionManager
 from backend.tools.netease_api import get_song_mp3_url, search_first_song
 
@@ -50,6 +52,7 @@ class AssistantService:
     MAX_RETRIES = 2
     SESSION_TTL = 86400
     MAX_SESSIONS = 100
+    REFLECT_EVERY_TURNS = 10  # Reflection: 每 N 轮对话压一次会话摘要
 
     def __init__(
         self,
@@ -64,6 +67,8 @@ class AssistantService:
         self.intent_classifier = IntentClassifier()
         self.tool_executor = ToolExecutor(max_retries=self.MAX_RETRIES)
         self.episodic_provider = EpisodicMemoryProvider(self.episodic_memory)
+        self.summary_provider = SessionSummaryProvider(self.episodic_memory)
+        self.reflector = SessionReflector(self.episodic_memory)
         self.tts = TTSProvider()
 
     # ================================================================
@@ -72,6 +77,25 @@ class AssistantService:
 
     def _resolve_session(self, session_id: str | None) -> str:
         return session_id.strip() if session_id else str(uuid.uuid4())
+
+    def _build_tool_schemas(self, intent: Intent) -> list[dict[str, Any]]:
+        """按意图门控返回 OpenAI function schemas（RFC: function calling 重构）。
+
+        MUSIC_PLAY / MUSIC_RECOMMEND → 音乐类工具
+        WEATHER / CHITCHAT           → 不暴露工具（避免误导调用）
+        UNKNOWN                      → 全部可用工具
+        通用类工具（如 MCP 挂载）在音乐意图下同样可见。
+        """
+        categories = set(self.intent_classifier.should_activate_tool_categories(intent))
+        if not categories:
+            return []
+        from backend.tools.base import tool_registry
+
+        tools = [
+            t for t in tool_registry.get_available()
+            if t.category in categories or t.category == "general"
+        ]
+        return [t.to_openai_function_schema() for t in tools]
 
     def _ensure_memory_manager(self, session_id: str) -> None:
         ctx = self.session_manager.get_or_create(session_id)
@@ -87,6 +111,7 @@ class AssistantService:
             providers=[
                 EnvironmentProvider(),
                 ConversationHistoryProvider(ctx.short_term_memory),
+                SessionSummaryProvider(self.episodic_memory),
                 UserPreferenceProvider(ctx.memory_manager, self.episodic_memory),
                 CurrentlyPlayingProvider(),
                 ToolSchemaProvider(),
@@ -140,9 +165,14 @@ class AssistantService:
         # === DECIDE + EXECUTE (with retry loop) ===
         working_input = user_input
         retry_count = 0
+        tools = self._build_tool_schemas(intent)
+        force_tools = intent in {Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND}
 
         while True:
-            reply = await call_llm(NON_STREAMING_SYSTEM, user_prompt)
+            reply = await call_llm(
+                NON_STREAMING_SYSTEM, user_prompt,
+                tools=tools, force_tools=force_tools,
+            )
 
             actions = self._parse_actions_from_reply(reply)
             results = await self.tool_executor.execute_actions(actions)
@@ -166,6 +196,7 @@ class AssistantService:
 
         # === RECORD ===
         if final_reply.get("analysis") != "Model call failed.":
+            final_reply = self._ensure_dj_line(final_reply)
             played_song = final_reply.get("music")
             ctx.short_term_memory.add_turn(
                 user_input,
@@ -183,6 +214,7 @@ class AssistantService:
                 )
             )
 
+        self._maybe_reflect(sid, ctx)
         return final_reply, user_prompt
 
     # ================================================================
@@ -276,6 +308,7 @@ class AssistantService:
                         played_song=song_data, session_id=sid,
                     )
                 )
+                self._maybe_reflect(sid, ctx)
                 yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
                 return
 
@@ -302,10 +335,15 @@ class AssistantService:
             user_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
             session_id=sid,
         )
+        tools = self._build_tool_schemas(intent)
+        force_tools = intent in {Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND}
 
         reply: dict[str, Any] = {}
 
-        async for chunk in stream_llm(SINGLE_PASS_STREAM_SYSTEM, user_prompt):
+        async for chunk in stream_llm(
+            SINGLE_PASS_STREAM_SYSTEM, user_prompt,
+            tools=tools, force_tools=force_tools,
+        ):
             if isinstance(chunk, str):
                 yield self._sse("token", chunk)
             elif isinstance(chunk, dict):
@@ -337,7 +375,10 @@ class AssistantService:
             )
 
             # Retry silently via non-streaming LLM — user already saw the original text
-            retry_reply = await call_llm(NON_STREAMING_SYSTEM, retry_prompt)
+            retry_reply = await call_llm(
+                NON_STREAMING_SYSTEM, retry_prompt,
+                tools=tools, force_tools=force_tools,
+            )
             retry_actions = self._parse_actions_from_reply(retry_reply)
             results = await self.tool_executor.execute_actions(retry_actions)
             final_reply = await self._merge_tool_results(retry_reply, results)
@@ -345,6 +386,12 @@ class AssistantService:
         music = final_reply.get("music")
         if isinstance(music, dict) and music.get("song_id"):
             yield self._sse("music", json.dumps(music, ensure_ascii=False))
+
+        # 工具 required 模式下文案可能为空 → 模板兜底（不空场）
+        final_reply = self._ensure_dj_line(final_reply)
+        # 兜底文案补发 text 事件（此前 text 事件用 LLM 原文，可能为空）
+        if final_reply.get("answer", "").strip() and not reply.get("answer", "").strip():
+            yield self._sse("text", final_reply["answer"])
 
         # TTS — for CHITCHAT/WEATHER this is the main audio output (no music)
         speech_sse = await self._maybe_yield_speech(
@@ -369,6 +416,7 @@ class AssistantService:
                 session_id=sid,
             )
         )
+        self._maybe_reflect(sid, ctx)
 
         yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
 
@@ -463,40 +511,69 @@ class AssistantService:
         )
 
     # ================================================================
+    # Reflection（v5）—— 每 N 轮把对话压成跨会话摘要
+    # ================================================================
+
+    def _maybe_reflect(self, session_id: str, ctx: Any) -> None:
+        """每 REFLECT_EVERY_TURNS 轮触发一次会话摘要（fire-and-forget）。
+
+        用 ctx.last_summary_turn 节流：即使多次请求并发也只会触发一次。
+        失败静默（Reflector 内部已降级），不阻断对话。
+        """
+        turn_count = len(ctx.short_term_memory)
+        if turn_count < self.REFLECT_EVERY_TURNS:
+            return
+        if (turn_count - ctx.last_summary_turn) < self.REFLECT_EVERY_TURNS:
+            return
+        ctx.last_summary_turn = turn_count
+
+        transcript = ctx.short_term_memory.format_history()
+        if not transcript.strip():
+            return
+        try:
+            asyncio.ensure_future(
+                self.reflector.summarize_and_store(
+                    session_id, transcript, turn_count,
+                )
+            )
+        except Exception:
+            logger.warning("Reflection 调度失败（不影响对话）", exc_info=True)
+
+    # ================================================================
     # Helpers
     # ================================================================
 
     @staticmethod
+    def _ensure_dj_line(reply: dict[str, Any]) -> dict[str, Any]:
+        """工具调用为 required 时模型可能只输出 tool_calls 不写文案。
+
+        若最终回答为空但音乐已解析，用确定性模板补一句 DJ 台词，
+        保证打字机效果与文案展示不空场。
+        """
+        if reply.get("answer", "").strip():
+            return reply
+        music = reply.get("music")
+        if isinstance(music, dict) and music.get("name"):
+            name = music.get("name", "")
+            artist = music.get("artist", "")
+            reply["answer"] = (
+                f"来一首 {artist} 的《{name}》。" if artist else f"来一首《{name}》。"
+            )
+            reply["analysis"] = ""
+        return reply
+
+    @staticmethod
     def _parse_actions_from_reply(reply: dict[str, Any]) -> list[dict[str, Any]]:
+        """Normalize reply → tool action dicts.
+
+        RFC: function calling 重构后，LLM 返回的 tool_calls 已在 llm_client
+        归一化为 {"tool": name, ...args} 形式，这里只做类型过滤（保留
+        向后兼容：旧的 "actions" 文本格式不再解析，ast 兜底已删除）。
+        """
         actions = reply.get("actions", [])
         if not isinstance(actions, list):
             return []
-
-        tool_actions: list[dict[str, Any]] = []
-        for item in actions:
-            if isinstance(item, dict) and "tool" in item:
-                tool_actions.append(item)
-                continue
-
-            if isinstance(item, str):
-                stripped = item.strip()
-                try:
-                    parsed = json.loads(stripped)
-                    if isinstance(parsed, dict) and "tool" in parsed:
-                        tool_actions.append(parsed)
-                        continue
-                except json.JSONDecodeError:
-                    pass
-                try:
-                    import ast
-                    parsed = ast.literal_eval(stripped)
-                    if isinstance(parsed, dict) and "tool" in parsed:
-                        tool_actions.append(parsed)
-                        continue
-                except (ValueError, SyntaxError):
-                    pass
-
-        return tool_actions
+        return [item for item in actions if isinstance(item, dict) and "tool" in item]
 
     @staticmethod
     async def _merge_tool_results(

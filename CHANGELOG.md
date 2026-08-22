@@ -7,7 +7,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Reflection 会话摘要（v5）** — 跨会话连续性：
+  - 每 10 轮对话自动触发 LLM 摘要（`SUMMARY_REFLECTION_SYSTEM`），产出
+    {summary, topics, song_signals} 结构化入库（`session_summaries` 表）
+  - `SessionSummaryProvider` 把历史会话摘要注入上下文——DJ 重启/换会话不失忆
+  - 触发节流（`ctx.last_summary_turn`）、失败静默降级，不阻断对话
+- Hybrid retrieval in `query_by_semantic`: semantic (ChromaDB) + keyword (SQLite LIKE on
+  input/reply/song name/artist) fused via RRF (k=60), then decay rerank; ChromaDB-down
+  still falls back to pure keyword
+- `FastEmbedProvider` (fastembed): local Chinese-optimized BGE embeddings
+  (`EMBEDDING_PROVIDER=fastembed`, `BAAI/bge-small-zh-v1.5` default)
+- `scripts/rebuild_embeddings.py`: rebuild ChromaDB collection when switching embedding
+  models (dimension detection + auto delete/recreate, batch upsert)
+- Playback feedback loop: `POST /v1/agent/feedback` receives song_started/finished/skipped/failed events
+- Frontend playback telemetry: `PlayerPanel` reports finish/skip/fail to calibrate memory importance
+- Memory calibration: `record_play_feedback()` adjusts `importance_score` (+0.15 finished / -0.15 skipped, clamped 0.05-0.98)
+- Migration v3: `song_id` + feedback columns (`played_to_completion`, `listen_duration`, `play_count`, `skip_count`, `last_feedback`)
+- Eval baseline: intent golden set (60 cases) + retrieval eval set (12 seeds / 11 queries) with runners (`eval/`)
 - Centralized prompt registry (`prompts.py`) with layered architecture (RFC-007)
+
+### Changed
+- **RFC: function calling 重构** — 移除 `---JSON---` 文本标记协议（`llm_client` / prompts）：
+  - `call_llm` / `stream_llm` 支持 OpenAI 原生 `tools` 参数，tool_calls 归一化为
+    `{"tool": name, ...args}` 动作 dict（流式分片自动拼接 arguments）
+  - `_parse_actions_from_reply` 删除 json.loads/ast 兜底解析链（仅保留类型过滤）
+  - `BaseTool.category` 意图门控：MUSIC_PLAY/RECOMMEND → 音乐工具；CHITCHAT/WEATHER → 无工具；
+    UNKNOWN → 全部可用工具
+  - 流式输出为纯文案（前端打字机直出），工具调用走标准协议，不再与文本混编
 - Professional DJ + friend persona with forbidden broadcast phrases
 - Hard play signal detection in intent classifier (eliminates song/emotion ambiguity)
 - System prompts sent as `role="system"` for higher instruction adherence
@@ -20,6 +46,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Phase 1 decision no longer hallucinates artist names for bare song title queries
 
 ### Fixed
+- **deepseek-v4-flash 空回答**: 该模型是推理模型，`reasoning_content` 会吃光 `max_tokens`
+  预算导致 `content` 为空。新增 `_provider_extra_body()` 对 deepseek 显式
+  `thinking: {"type": "disabled"}`（`LLM_DISABLE_THINKING=false` 可关），
+  意图分类/流式回答/JSON 调用全部修复
 - PHASE2_STREAM_SYSTEM missing JSON format example causing empty DJ scripts
 - f-string brace escaping in Phase 2 prompt preventing module import on CI
 

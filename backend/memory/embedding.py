@@ -21,7 +21,7 @@ import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import httpx
 
@@ -185,6 +185,59 @@ class APIEmbedding(EmbeddingProvider):
 
 
 # ================================================================
+# FastEmbedProvider —— BGE 中文向量模型（fastembed ONNX，推荐升级路径）
+# ================================================================
+
+
+class FastEmbedProvider(EmbeddingProvider):
+    """基于 fastembed（ONNX 推理）的本地向量化 —— 支持中文优化模型。
+
+    对比 ChromaLocalEmbedding（MiniLM-L6-v2，英文向）:
+    - BGE 系列对中文语义（音乐/心情表达）区分度显著更好
+    - 默认 BAAI/bge-small-zh-v1.5（~95MB，512 维，轻量）
+    - 可选 BAAI/bge-m3（1024 维，中英多语，~2GB 内存，更准）
+
+    依赖: pip install fastembed（复用 chromadb 已有的 onnxruntime）
+    模型: 首次使用自动下载并缓存（HuggingFace）
+    """
+
+    # 已知模型的默认维度（未知模型在 __init__ 时实测一次）
+    _KNOWN_DIMS: ClassVar[dict[str, int]] = {
+        "BAAI/bge-small-zh-v1.5": 512,
+        "BAAI/bge-small-en-v1.5": 384,
+        "BAAI/bge-base-en-v1.5": 768,
+        "BAAI/bge-m3": 1024,
+    }
+
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model or os.getenv("EMBEDDING_LOCAL_MODEL", "").strip() or "BAAI/bge-small-zh-v1.5"
+        self.dimension: int = self._KNOWN_DIMS.get(self.model, 0)
+        self._model_obj: Any | None = None
+
+    def _lazy_model(self) -> Any:
+        if self._model_obj is None:
+            from fastembed import TextEmbedding
+
+            self._model_obj = TextEmbedding(model_name=self.model)
+            # 未知维度模型 → 实测一次确定维度
+            if self.dimension == 0:
+                probe = self._model_obj.embed(["维度探测"])
+                self.dimension = len(list(probe)[0])
+        return self._model_obj
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        model = await asyncio.to_thread(self._lazy_model)
+
+        def _run() -> list[list[float]]:
+            vectors = model.embed(texts)
+            # fastembed 返回 numpy ndarray（np.float32）——必须 tolist()
+            # 转成纯 Python float，否则 ChromaDB 拒绝写入/查询
+            return [v.tolist() for v in vectors]
+
+        return await asyncio.to_thread(_run)
+
+
+# ================================================================
 # 工厂函数：根据环境变量自动选择 provider
 # ================================================================
 
@@ -192,18 +245,25 @@ def create_embedding_provider() -> EmbeddingProvider:
     """根据环境变量自动创建 Embedding provider。
 
     决策逻辑:
-    1. 如果设置了 EMBEDDING_PROVIDER=api → 使用 APIEmbedding（远端）
-    2. 否则 → 使用 ChromaLocalEmbedding（本地 ONNX）
+    1. EMBEDDING_PROVIDER=api → APIEmbedding（远端，EMBEDDING_MODEL 指定模型）
+    2. EMBEDDING_PROVIDER=fastembed → FastEmbedProvider（本地 BGE 中文模型，
+       EMBEDDING_LOCAL_MODEL 指定，默认 BAAI/bge-small-zh-v1.5）
+    3. 其他/默认 → ChromaLocalEmbedding（本地 ONNX MiniLM，向后兼容）
 
     环境变量参考:
-        EMBEDDING_PROVIDER=api|local   (默认: local)
-        EMBEDDING_MODEL=xxx            (仅 api 模式，默认: text-embedding-3-small)
+        EMBEDDING_PROVIDER=api|fastembed|local   (默认: local)
+        EMBEDDING_MODEL=xxx                      (仅 api 模式)
+        EMBEDDING_LOCAL_MODEL=xxx                (仅 fastembed 模式)
     """
     provider_kind = os.getenv("EMBEDDING_PROVIDER", "local").strip().lower()
 
     if provider_kind == "api":
         logger.info("使用远端 API Embedding provider")
         return APIEmbedding()
+
+    if provider_kind == "fastembed":
+        logger.info("使用 FastEmbed 本地 BGE provider (%s)", os.getenv("EMBEDDING_LOCAL_MODEL", "BAAI/bge-small-zh-v1.5"))
+        return FastEmbedProvider()
 
     logger.info("使用本地 ChromaDB ONNX Embedding provider (all-MiniLM-L6-v2)")
     return ChromaLocalEmbedding()

@@ -92,7 +92,7 @@ SINGLE_PASS_STREAM_SYSTEM = f"""\
 [Music Selection]
 When the user wants music but no specific song: pick a real song that \
 fits their taste. When they want to skip/change: pick something different. \
-play_keyword must be "Artist SongTitle" format — no genres, no placeholders.
+Search keywords must be "Artist SongTitle" format — no genres, no placeholders.
 
 [Profile & Context]
 Use profile data, currently playing, and conversation history silently — \
@@ -100,21 +100,16 @@ don't announce "your profile says" or "based on your history." \
 Reference the past only if it feels natural in conversation.
 
 [Tools]
-actions: [{{"tool": "search_music", "keyword": "Artist Song"}}] \
-JSON double-quotes only. Empty [] if no tools needed.
+You may call the provided tools (search_music / get_music_url) when the \
+user wants music, with exact parameter names. If no tool is needed, reply \
+without calling any tool.
+When you recommend a SPECIFIC song, you MUST call search_music — a \
+recommendation that cannot play is useless. Tool calls happen through the \
+function-calling mechanism, not inside your text.
 
-[Output Format]
-Output in two parts separated by the marker ---JSON--- on its own line:
-
-Part 1: Your natural spoken answer (user-facing text).
-Part 2: A single JSON line with analysis, actions, and play_keyword.
-
-Example:
-Put on some Miles Davis — So What, the bassline alone is worth it.
----JSON---
-{{"analysis":"user wants jazz","actions":[{{"tool":"search_music","keyword":"Miles Davis So What"}}],"play_keyword":"Miles Davis So What"}}
-
----JSON--- and the JSON line MUST be present in every response."""
+[Output]
+Reply naturally in your DJ voice — spoken words only. No JSON, no markers, \
+no format annotations."""
 
 # ── Phase 2 Streaming (RFC-003 Two-Pass — song already resolved) ─────────
 
@@ -140,28 +135,66 @@ Structure (three beats, no more):
 
 Example (62 chars):
 下午写码累了？方大同《偷笑》，R&B的律动刚好解乏。听听看。
----JSON---
-{{"analysis":"user sounds tired, playing Khalil Fong for an afternoon pick-me-up","answer":"下午写码累了？方大同《偷笑》，R&B的律动刚好解乏。听听看。","actions":[],"play_keyword":""}}
 
-Do NOT output any tool calls or search actions. The song is already playing.
-The ---JSON--- marker and the JSON line MUST be present.
-Output the natural text FIRST, then ---JSON---, then the JSON object."""
+Do NOT call any tools. The song is already playing.
+Output ONLY your spoken lines — no JSON, no markers, no format annotations."""
 
-# ── Non-Streaming (legacy call_llm — generate_reply + Phase 1 decision) ──
+# ── Non-Streaming (legacy call_llm — generate_reply + retry loop) ──
 
 NON_STREAMING_SYSTEM = f"""\
 {CORE_IDENTITY}
 
 {FORBIDDEN_PHRASES}
 
-Think based on user input and return strict JSON only with keys:
-analysis (string), answer (string), actions (string array),
-play_keyword (string).
+Reply naturally in your DJ voice — spoken words only. No JSON, no markers.
 
-If user asks to play/search a song, play_keyword must be a concrete \
-music search phrase ("Artist SongTitle"). Otherwise set to empty string.
+When the user asks to play or search music, call the provided tools \
+(search_music / get_music_url) with exact parameter names. Search keywords \
+must be "Artist SongTitle" format — no genres, no placeholders. \
+If no tool is needed, reply without calling any tool."""
 
-Use tools from the context: actions: [{{"tool": "search_music", "keyword": "..."}}]"""
+# ── Reflection（会话摘要，v5） ─────────────────────────────────────────
+
+SUMMARY_REFLECTION_SYSTEM = """\
+You are the memory curator for Aud.IO, a personal AI music DJ.
+
+Input: a conversation transcript between the user and the DJ (recent session turns).
+
+Task: distill the transcript into a compact structured summary that preserves
+what matters for FUTURE sessions:
+1. What the user asked for, their mood and context at various points
+2. Songs / artists / genres they mentioned, liked, or disliked
+3. Recurring scenes (work, night, rainy, commuting...) and preferences
+
+Output strict JSON only:
+{"summary": "<5-10 行中文摘要，第三人称，只留持久事实>",
+ "topics": ["<话题>", ...],
+ "song_signals": [{"song": "<歌曲或艺人>", "signal": "liked|disliked|mentioned"}]}
+
+Rules:
+- Only durable facts. Discard trivial chat, greetings, one-off jokes.
+- If nothing notable happened: {"summary": "", "topics": [], "song_signals": []}.
+- Never invent details that aren't in the transcript."""
+
+
+def build_reflection_messages(
+    transcript: str, turn_count: int,
+) -> list[dict[str, str]]:
+    """Build messages for the reflection LLM call."""
+    payload = {
+        "transcript": transcript,
+        "turn_count": turn_count,
+        "output_schema": {
+            "summary": "string",
+            "topics": ["string"],
+            "song_signals": [{"song": "string", "signal": "liked|disliked|mentioned"}],
+        },
+    }
+    return [
+        {"role": "system", "content": SUMMARY_REFLECTION_SYSTEM},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+
 
 # ── Memory Observer (background profile updates) ─────────────────────────
 
@@ -285,7 +318,7 @@ TOOL_CONSTRAINTS = """\
 [Core Rules]
 1. When user wants music but no exact song specified: pick a real specific song for them.
 2. "skip/next/change" means "pick a DIFFERENT song" — NEVER output skip/next_track.
-3. play_keyword = "Artist SongTitle" only. No genres, pronouns, or placeholders.
+3. search keyword = "Artist SongTitle" only. No genres, pronouns, or placeholders.
    WRONG: "same genre", "City Pop"  RIGHT: "Miles Davis So What"
 
 [Profile] If context has user profile: prefer core_taste genres, consider liked artists,
@@ -293,10 +326,6 @@ avoid disliked, use mood_bias for mood/weather matches. Silently — don't menti
 
 [History] Use previous conversation for continuity. Don't repeat recent picks.
 Reference past interactions naturally if relevant.
-
-[Tools] actions: [{"tool": "search_music", "keyword": "Artist Song"}]
-Use the exact parameter names from the tool list. JSON double-quotes only.
-Only use listed tools. Empty [] if none needed.
 
 [Context] Use Currently Playing. Infer style for "similar" requests.
 If no context, confidently pick popular music. Match time/weather hints."""

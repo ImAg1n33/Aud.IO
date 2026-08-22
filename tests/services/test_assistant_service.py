@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from fastapi import BackgroundTasks
 
@@ -36,7 +38,7 @@ TEST_SID = "test-session"
 class TestGenerateReply:
     @pytest.mark.asyncio
     async def test_injects_profile_for_music_intent(self, service, monkeypatch) -> None:
-        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
             assert "lofi" in user_prompt or "Preferred genres" in user_prompt
             return {
                 "analysis": "ok",
@@ -59,7 +61,7 @@ class TestGenerateReply:
 
     @pytest.mark.asyncio
     async def test_chitchat_skips_profile(self, service, monkeypatch) -> None:
-        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
             assert "User Music Profile" not in user_prompt
             return {
                 "analysis": "ok",
@@ -79,7 +81,7 @@ class TestGenerateReply:
 
     @pytest.mark.asyncio
     async def test_records_short_term_memory(self, service, monkeypatch) -> None:
-        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
             return {
                 "analysis": "ok",
                 "answer": "test answer",
@@ -102,7 +104,7 @@ class TestGenerateReply:
     async def test_retries_on_tool_error(self, service, monkeypatch) -> None:
         call_count = {"val": 0}
 
-        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
             call_count["val"] += 1
             return {
                 "analysis": "ok",
@@ -135,7 +137,7 @@ class TestGenerateReply:
 
     @pytest.mark.asyncio
     async def test_graceful_degradation_after_retries(self, service, monkeypatch) -> None:
-        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
             return {
                 "analysis": "ok",
                 "answer": "playing",
@@ -176,13 +178,52 @@ class TestScheduleProfileUpdate:
         assert task.func.__name__ == "async_update_profile"
 
 
+class TestBuildToolSchemas:
+    """RFC: function calling —— 工具按意图门控暴露给 LLM。"""
+
+    @staticmethod
+    def _ensure_music_tools_registered() -> None:
+        """test_base 的 registry.reset() 会清空全局注册表——此处确保存在。"""
+        from backend.tools.base import tool_registry
+        from backend.tools.music_tool import GetMusicUrlTool, SearchMusicTool
+
+        if "search_music" not in tool_registry:
+            tool_registry.register(SearchMusicTool())
+        if "get_music_url" not in tool_registry:
+            tool_registry.register(GetMusicUrlTool())
+
+    def test_music_intent_exposes_music_tools(self, service, monkeypatch) -> None:
+        from backend.agent.intent_classifier import Intent
+
+        self._ensure_music_tools_registered()
+        monkeypatch.setenv("NETEASE_COOKIE", "test-cookie")
+        schemas = service._build_tool_schemas(Intent.MUSIC_PLAY)
+        names = {s["function"]["name"] for s in schemas}
+        assert "search_music" in names
+        assert "get_music_url" in names
+        assert all(s["type"] == "function" for s in schemas)
+
+    def test_chitchat_exposes_no_tools(self, service) -> None:
+        from backend.agent.intent_classifier import Intent
+
+        assert service._build_tool_schemas(Intent.CHITCHAT) == []
+
+    def test_unknown_exposes_all_available(self, service, monkeypatch) -> None:
+        from backend.agent.intent_classifier import Intent
+
+        self._ensure_music_tools_registered()
+        monkeypatch.setenv("NETEASE_COOKIE", "test-cookie")
+        schemas = service._build_tool_schemas(Intent.UNKNOWN)
+        assert len(schemas) >= 2  # 音乐工具（无 cookie 时为空，有 cookie 时 ≥2）
+
+
 class TestSessionIsolation:
     """Verify two concurrent sessions never pollute each other's state."""
 
     @pytest.mark.asyncio
     async def test_conversation_history_isolated(self, service, monkeypatch) -> None:
         """Session A's conversation should not leak into Session B."""
-        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
             return {
                 "analysis": "ok", "answer": "ok",
                 "actions": [], "play_keyword": "",
@@ -213,7 +254,7 @@ class TestSessionIsolation:
     @pytest.mark.asyncio
     async def test_episodic_memory_filtered_by_session(self, service, monkeypatch) -> None:
         """Episodic snapshots store session_id and queries filter by it."""
-        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
             return {
                 "analysis": "ok", "answer": "playing",
                 "actions": [], "play_keyword": "",
@@ -562,3 +603,52 @@ class TestTTSIntegration:
         event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
         # TTS is disabled for music_recommend — no speech. The pipeline just works.
         assert "done" in event_types, "pipeline must complete even when TTS is unavailable"
+
+@pytest.mark.asyncio
+class TestReflectionTrigger:
+    """v5 Reflection —— 每 10 轮触发一次会话摘要，节流防重。"""
+
+    async def test_fires_after_10_turns(self, service, monkeypatch) -> None:
+        ctx = service.session_manager.get_or_create("reflect-fire")
+        for i in range(10):
+            ctx.short_term_memory.add_turn(f"msg {i}", f"reply {i}")
+
+        scheduled: dict = {}
+        async def fake_summarize(sid: str, transcript: str, turn_count: int):
+            scheduled["hit"] = (sid, turn_count)
+            return 1
+
+        monkeypatch.setattr(service.reflector, "summarize_and_store", fake_summarize)
+        service._maybe_reflect("reflect-fire", ctx)
+        await asyncio.sleep(0.05)  # 让 ensure_future 任务执行
+        assert scheduled.get("hit") == ("reflect-fire", 10)
+
+    async def test_throttled_within_window(self, service, monkeypatch) -> None:
+        ctx = service.session_manager.get_or_create("reflect-throttle")
+        for i in range(12):
+            ctx.short_term_memory.add_turn(f"msg {i}", f"reply {i}")
+
+        hits: list[int] = []
+        async def fake_summarize(sid: str, transcript: str, turn_count: int):
+            hits.append(turn_count)
+            return 1
+
+        monkeypatch.setattr(service.reflector, "summarize_and_store", fake_summarize)
+        service._maybe_reflect("reflect-throttle", ctx)
+        await asyncio.sleep(0.05)
+        service._maybe_reflect("reflect-throttle", ctx)  # 同窗口内第二次不触发
+        assert hits == [12]
+
+    async def test_no_fire_below_threshold(self, service, monkeypatch) -> None:
+        ctx = service.session_manager.get_or_create("reflect-low")
+        for i in range(5):
+            ctx.short_term_memory.add_turn(f"msg {i}", f"reply {i}")
+
+        hits: list[int] = []
+        async def fake_summarize(sid: str, transcript: str, turn_count: int):
+            hits.append(turn_count)
+
+        monkeypatch.setattr(service.reflector, "summarize_and_store", fake_summarize)
+        service._maybe_reflect("reflect-low", ctx)
+        await asyncio.sleep(0.05)
+        assert hits == []

@@ -9,7 +9,7 @@ import json
 import logging
 import os
 from enum import Enum
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import httpx
 from backend.agent.prompts import INTENT_CLASSIFIER_SYSTEM
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # ── LLM config ──
 
 _CLASSIFY_TIMEOUT = 1.5
+_CLASSIFY_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek").strip().lower()
 _CLASSIFY_MODEL = os.getenv("LLM_MODEL", "").strip() or "deepseek-v4-flash"
 _CLASSIFY_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").strip()
 _CLASSIFY_API_KEY = (
@@ -91,7 +92,7 @@ class IntentClassifier:
             raise RuntimeError("LLM_API_KEY not configured")
 
         endpoint = f"{_CLASSIFY_BASE_URL.rstrip('/')}/chat/completions"
-        body = {
+        body: dict[str, Any] = {
             "model": _CLASSIFY_MODEL,
             "temperature": 0,
             "max_tokens": 10,
@@ -101,6 +102,12 @@ class IntentClassifier:
                 {"role": "user", "content": user_input},
             ],
         }
+        # deepseek-v4-flash 是推理模型——不关 thinking 的话 10 token 全被思考吃掉，
+        # JSON 永远解析失败，LLM 意图分类退化为纯关键词兜底
+        if _CLASSIFY_PROVIDER == "deepseek" and (
+            os.getenv("LLM_DISABLE_THINKING", "true").strip().lower() != "false"
+        ):
+            body["thinking"] = {"type": "disabled"}
 
         async with httpx.AsyncClient(timeout=_CLASSIFY_TIMEOUT) as client:
             response = await client.post(

@@ -20,7 +20,7 @@ class MigrationManager:
     ChromaDB collection 引用是可选的 —— 仅在需要元数据回填时传入。
     """
 
-    CURRENT_VERSION = 2
+    CURRENT_VERSION = 5
 
     def __init__(
         self,
@@ -32,6 +32,9 @@ class MigrationManager:
         self._migrations = [
             (1, self._migrate_v1_session_id),
             (2, self._migrate_v2_decay_fields),
+            (3, self._migrate_v3_feedback_fields),
+            (4, self._migrate_v4_repair_columns),
+            (5, self._migrate_v5_session_summaries),
         ]
 
     # ── 初始化 ─────────────────────────────────────────────────────────
@@ -156,4 +159,100 @@ class MigrationManager:
                     conn.execute(f"ALTER TABLE episodes ADD COLUMN {col} {col_type}")
                 except sqlite3.OperationalError:
                     pass
+            conn.commit()
+
+    # ── v3: 播放反馈字段（RFC: 反馈闭环） ────────────────────────────────
+
+    def _migrate_v3_feedback_fields(self) -> None:
+        """Add song_id + playback feedback columns for the feedback loop.
+
+        - song_id: NetEase song ID, used to match feedback events to snapshots
+        - played_to_completion / play_count / skip_count / last_feedback / listen_duration:
+          implicit signals that calibrate importance_score (DJ learns from outcomes)
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            for col, col_type in [
+                ("song_id", "TEXT"),
+                ("played_to_completion", "INTEGER NOT NULL DEFAULT 0"),
+                ("listen_duration", "REAL"),
+                ("play_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("skip_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_feedback", "TEXT"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE episodes ADD COLUMN {col} {col_type}")
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_episodes_song "
+                    "ON episodes(session_id, song_id)"
+                )
+            except sqlite3.OperationalError:
+                pass
+            conn.commit()
+
+    # ── v4: 自愈修复 ─────────────────────────────────────────────────
+
+    def _migrate_v4_repair_columns(self) -> None:
+        """确保所有期望列存在（历史库迁移状态不完整时的兜底）。
+
+        背景: 早期镜像时代的 episodes 表可能已含部分 v2 列（importance_score /
+        access_count）但缺 last_accessed，且 schema_version 已被记为 2/3，
+        导致 v2/v3 迁移被跳过而列缺失 → store_snapshot INSERT 报错。
+        本迁移幂等地补齐所有缺失列，任何历史状态都能自愈。
+        """
+        expected: dict[str, str] = {
+            "session_id": "TEXT NOT NULL DEFAULT 'default'",
+            "importance_score": "REAL NOT NULL DEFAULT 0.5",
+            "access_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_accessed": "TEXT",
+            "song_id": "TEXT",
+            "played_to_completion": "INTEGER NOT NULL DEFAULT 0",
+            "listen_duration": "REAL",
+            "play_count": "INTEGER NOT NULL DEFAULT 0",
+            "skip_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_feedback": "TEXT",
+        }
+        with sqlite3.connect(str(self.db_path)) as conn:
+            existing = {r[1] for r in conn.execute("PRAGMA table_info(episodes)")}
+            repaired: list[str] = []
+            for col, col_type in expected.items():
+                if col in existing:
+                    continue
+                try:
+                    conn.execute(
+                        f"ALTER TABLE episodes ADD COLUMN {col} {col_type}"
+                    )
+                    repaired.append(col)
+                except sqlite3.OperationalError:
+                    pass
+            conn.commit()
+        if repaired:
+            logger.info("v4 自愈修复: 补齐缺失列 %s", repaired)
+
+    # ── v5: 会话摘要（Reflection） ────────────────────────────────────
+
+    def _migrate_v5_session_summaries(self) -> None:
+        """Create session_summaries table for cross-session continuity.
+
+        Reflection 每 N 轮把短时对话压成结构化摘要存这里，
+        下次会话启动时由 SessionSummaryProvider 注入 —— DJ 跨会话不失忆。
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS session_summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    summary_text TEXT NOT NULL,
+                    topics TEXT NOT NULL DEFAULT '[]',
+                    song_signals TEXT NOT NULL DEFAULT '[]',
+                    turn_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_summaries_session
+                ON session_summaries(session_id, id DESC)
+            """)
             conn.commit()

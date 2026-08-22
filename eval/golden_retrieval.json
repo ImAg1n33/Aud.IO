@@ -1,0 +1,35 @@
+{
+  "_meta": {
+    "description": "Aud.IO 记忆检索评估集 —— 语义召回基准（合成数据，衡量 query_by_semantic 的 recall@k 与 MRR）",
+    "intents": ["music_play", "music_recommend"],
+    "note": "seeds 为合成快照（贴近真实中文对话），queries 的 expect 指向 seed 下标（从 1 计）。\nexpect 支持单个数字或数组（任一命中即算 hit）。\n注意：time_of_day 由系统时钟自动写入（store_snapshot 不接受该参数），\n因此时段相关查询（如'凌晨睡不着'）依赖正文语义而非 metadata——\n这正是当前实现的一个已知限制，评估报告会如实反映。\nbaseline 目标：MiniLM-L6-v2 对中文查询的 recall@5 预计偏低，升级嵌入模型后重跑对比。",
+    "embedding_note": "默认使用本地 ONNX MiniLM-L6-v2（与生产一致）；可传 --embedding api 对比 API 嵌入效果。"
+  },
+  "seeds": [
+    {"user_input": "雨天想听爵士，有没有推荐", "assistant_reply": "下雨天配一杯热茶，来点 Miles Davis 的 So What，小号声像雨点一样落下来。", "song_name": "So What", "song_artist": "Miles Davis", "mood_tag": "rainy"},
+    {"user_input": "晚上写代码想听点 lofi", "assistant_reply": "深夜写代码，放点 lofi beats，节奏刚好卡在敲键盘的速度上。", "song_name": "Snowman", "song_artist": "Jinsang", "mood_tag": "focused"},
+    {"user_input": "跑步的时候放点电子", "assistant_reply": "跑步机上的节奏，电子舞曲走起，步频跟着鼓点来。", "song_name": "Strobe", "song_artist": "deadmau5", "mood_tag": "energetic"},
+    {"user_input": "心情低落想听治愈的民谣", "assistant_reply": "低落的时候适合安静的民谣，一把吉他就能接住情绪。", "song_name": "成都", "song_artist": "赵雷", "mood_tag": "sad"},
+    {"user_input": "失眠了想听点轻音乐", "assistant_reply": "失眠夜放点轻音乐，钢琴声慢下来，脑子也跟着慢下来。", "song_name": "River Flows in You", "song_artist": "Yiruma", "mood_tag": "sleepy"},
+    {"user_input": "想听周杰伦的晴天", "assistant_reply": "周杰伦《晴天》，前奏一响就是整个夏天。", "song_name": "晴天", "song_artist": "周杰伦", "mood_tag": "nostalgic"},
+    {"user_input": "下雨天通勤想听 city pop", "assistant_reply": "雨天通勤，city pop 最适合，车窗外的雨和副歌一样顺滑。", "song_name": "Plastic Love", "song_artist": "竹内まりや", "mood_tag": "rainy"},
+    {"user_input": "清晨醒来想听古典", "assistant_reply": "清晨来点古典钢琴，巴赫的平均律很适合刚醒的耳朵。", "song_name": "Goldberg Variations", "song_artist": "Bach", "mood_tag": "calm"},
+    {"user_input": "健身撸铁要硬摇滚", "assistant_reply": "健身房撸铁，硬摇滚走起，riff 一出来力气就回来了。", "song_name": "Back in Black", "song_artist": "AC/DC", "mood_tag": "energetic"},
+    {"user_input": "写代码要专注来点氛围电子", "assistant_reply": "写代码要专注，氛围电子铺底，人声越少越好。", "song_name": "Angel", "song_artist": "Burial", "mood_tag": "focused"},
+    {"user_input": "深夜emo听陈奕迅", "assistant_reply": "深夜 emo，陈奕迅《好久不见》，一首歌就是一段没说完的话。", "song_name": "好久不见", "song_artist": "陈奕迅", "mood_tag": "sad"},
+    {"user_input": "周末午后想听爵士下午茶", "assistant_reply": "周末午后，爵士下午茶，萨克斯和咖啡一样温吞。", "song_name": "Take Five", "song_artist": "Dave Brubeck", "mood_tag": "calm"}
+  ],
+  "queries": [
+    {"query": "上次放的那种下雨天听的歌", "expect": [1, 7], "note": "雨天语境语义召回"},
+    {"query": "工作的时候听的那些", "expect": [2, 10], "note": "工作/专注语境"},
+    {"query": "失眠的时候放点什么", "expect": [5], "note": "失眠→sleepy"},
+    {"query": "想听点治愈的", "expect": [4], "note": "情绪语义"},
+    {"query": "跑步节奏感强的", "expect": [3, 9], "note": "运动语境"},
+    {"query": "写代码的专注bgm", "expect": [10, 2], "note": "编程→focused"},
+    {"query": "凌晨睡不着", "expect": [11, 5], "note": "深夜失眠（依赖正文语义，time_of_day 无法注入）"},
+    {"query": "午后放松一下", "expect": [12], "note": "时段+情绪"},
+    {"query": "来首中文歌", "expect": [6, 11], "note": "中文歌曲"},
+    {"query": "安静的钢琴曲", "expect": [5, 8], "note": "乐器+氛围"},
+    {"query": "深夜emo的时候", "expect": [11, 4], "note": "emo→sad 语境"}
+  ]
+}

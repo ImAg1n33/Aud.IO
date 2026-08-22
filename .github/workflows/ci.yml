@@ -33,5 +33,14 @@ jobs:
       - name: Run tests
         run: pytest
 
+      - name: Run intent eval baseline (keyword mode, no LLM)
+        run: python -m eval.run_intent_eval --mode keyword --output eval/reports/intent-keyword-report.md
+
+      - name: Upload eval reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports
+          path: eval/reports/
+
       - name: Run secret scan
         run: python scripts/security_scan.py

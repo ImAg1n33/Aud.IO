@@ -1,10 +1,13 @@
 import { defineStore } from 'pinia'
+import { sendFeedback } from './feedback'
 
 // Non-reactive internals — Web Audio API objects don't benefit from Vue reactivity
 let audioCtx = null
 let fadeGain = null
 let fadeTimer = null
 let audioElement = null
+let playbackStartAt = null   // 当前曲目开始播放的时间戳（反馈时长计算）
+let finishedReported = false // 本曲是否已上报 finished（防止 stop 重复上报 skip）
 
 export const usePlayerStore = defineStore('player', {
   state: () => ({
@@ -75,13 +78,23 @@ export const usePlayerStore = defineStore('player', {
       audioElement.src = track.mp3_url
       audioElement.play().catch((e) => {
         console.error('Audio playback failed:', e.name, e.message)
+        sendFeedback('song_failed', track)
       })
       this.isPlaying = true
       this.currentTrack = track
       this.trackDisplay = `♪ ${track.name} - ${track.artist} ♪`
+      playbackStartAt = Date.now()
+      finishedReported = false
+      sendFeedback('song_started', track)
     },
 
     stopTrack() {
+      // 正在播放且未自然结束 → 视为用户切歌（负反馈）
+      if (this.isPlaying && this.currentTrack && !finishedReported && playbackStartAt) {
+        const seconds = (Date.now() - playbackStartAt) / 1000
+        sendFeedback('song_skipped', this.currentTrack, Math.round(seconds))
+        finishedReported = true
+      }
       if (!audioElement) return
       this._fadeOut(1.2)
       fadeTimer = setTimeout(() => {
@@ -123,6 +136,12 @@ export const usePlayerStore = defineStore('player', {
     },
 
     onEnded() {
+      // 自然播放结束 → 正反馈
+      if (this.currentTrack && playbackStartAt) {
+        const seconds = (Date.now() - playbackStartAt) / 1000
+        sendFeedback('song_finished', this.currentTrack, Math.round(seconds))
+      }
+      finishedReported = true
       this.isPlaying = false
       if (this.playMode === 'dj') {
         console.log('DJ mode: song ended, ready for next AI pick')

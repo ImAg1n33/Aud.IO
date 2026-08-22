@@ -27,6 +27,7 @@ from backend.memory.embedding import (
     EmbeddingProvider,
     create_embedding_provider,
 )
+from backend.memory.fusion import rrf_fuse
 from backend.memory.models import (
     EpisodicSnapshot,
     _time_of_day,
@@ -52,25 +53,17 @@ class EpisodicMemory:
         get_preference_stats() —— SQL 聚合统计（流派、艺人、心情相关性）
         format_stats_for_prompt() —— 将统计数据格式化为 LLM 可读文本
 
-    新增 API（向量检索能力）:
-        query_by_semantic()   —— 基于语义相似度的向量检索，替代旧 mood 关键词映射
-
-    使用示例:
-        # 自动选择 Embedding provider（默认本地 ONNX）
-        memory = EpisodicMemory()
-
-        # 指定远端 API embedding
-        from backend.memory.embedding import APIEmbedding
-        memory = EpisodicMemory(
-            embedding_provider=APIEmbedding(model="text-embedding-3-small"),
-        )
-
-        # 存储快照（自动检测 mood）
-        await memory.store_snapshot("放点轻松的爵士", "好的，来点 Miles Davis...")
-
-        # 语义检索 —— "适合下雨天听的" 自动匹配 rainy/jazz 相关记录
-        results = await memory.query_by_semantic("下雨天适合听什么", limit=5)
+    新增 API:
+        query_by_semantic()   —— 基于语义相似度的向量检索
+        record_play_feedback() —— 播放反馈闭环：用真实听歌结果校准重要性
+        get_feedback_stats()  —— 播放→完成率等推荐质量指标
     """
+
+    # 反馈事件对 importance_score 的校准幅度（0.05-0.98 区间内加减）
+    FEEDBACK_IMPORTANCE_DELTA: dict[str, float] = {
+        "song_finished": 0.15,  # 完整听完 = 正反馈
+        "song_skipped": -0.15,  # 切歌 = 负反馈
+    }
 
     def __init__(
         self,
@@ -147,9 +140,11 @@ class EpisodicMemory:
         # --- 提取歌曲信息 ---
         song_name = None
         song_artist = None
+        song_id = None
         if isinstance(played_song, dict):
             song_name = str(played_song.get("name", "")) or None
             song_artist = str(played_song.get("artist", "")) or None
+            song_id = str(played_song.get("song_id", "")) or None
 
         # --- 自动检测心情标签 ---
         if mood_tag is None:
@@ -181,6 +176,7 @@ class EpisodicMemory:
             genre_tag,
             session_id,
             importance_score,
+            song_id,
         )
 
         # --- 2) ChromaDB 写入（携带向量嵌入） ---
@@ -190,7 +186,7 @@ class EpisodicMemory:
             song_artist=song_artist, mood_tag=mood_tag,
             weather_tag=weather_tag, time_of_day=time_of_day,
             genre_tag=genre_tag, session_id=session_id,
-            importance_score=importance_score,
+            importance_score=importance_score, song_id=song_id,
         )
 
         logger.debug(
@@ -213,6 +209,82 @@ class EpisodicMemory:
         await self._sqlite.record_access(snapshot_ids)
 
     # ================================================================
+    # 反馈闭环 —— 用真实听歌结果校准记忆
+    # ================================================================
+
+    async def record_play_feedback(
+        self,
+        session_id: str,
+        song_id: str,
+        event: str,
+        listen_seconds: float | None = None,
+    ) -> int | None:
+        """记录一次播放反馈事件，并据此校准对应快照的重要性。
+
+        事件:
+            song_started  —— 播放开始（仅标记，不调权重）
+            song_finished —— 完整播完（正反馈：importance +0.15, play_count +1）
+            song_skipped  —— 中途切歌（负反馈：importance -0.15, skip_count +1）
+            song_failed   —— 播放失败（仅标记，用户无过错不降权）
+
+        Args:
+            session_id: 会话标识（与快照写入一致）
+            song_id: 歌曲 ID（快照写入时从 played_song 提取）
+            event: 反馈事件名
+            listen_seconds: 收听秒数（finished/skipped 时前端上报）
+
+        Returns:
+            匹配到的快照 ID；未匹配（无 song_id 的历史快照）返回 None。
+        """
+        row_id = await asyncio.to_thread(
+            self._sqlite.find_latest_by_song, session_id, song_id,
+        )
+        if row_id is None:
+            return None
+
+        delta = self.FEEDBACK_IMPORTANCE_DELTA.get(event)
+        await self._sqlite.apply_play_feedback(row_id, event, listen_seconds, delta)
+
+        logger.debug(
+            "播放反馈已记录: event=%s, song_id=%s, snapshot=%d, delta=%s",
+            event, song_id, row_id, delta,
+        )
+        return row_id
+
+    async def get_feedback_stats(
+        self, session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """播放反馈聚合统计 —— 播放→完成率（推荐质量指标）。"""
+        return await self._sqlite.get_feedback_stats(session_id=session_id)
+
+    # ================================================================
+    # 会话摘要（Reflection, v5）—— 跨会话连续性
+    # ================================================================
+
+    async def insert_session_summary(
+        self,
+        session_id: str,
+        summary_text: str,
+        topics: list[str],
+        song_signals: list[dict[str, Any]],
+        turn_count: int,
+    ) -> int:
+        """持久化一条会话摘要（Reflection 产物）。"""
+        return await self._sqlite.insert_session_summary(
+            session_id, summary_text, topics, song_signals, turn_count,
+        )
+
+    async def query_recent_summaries(
+        self, session_id: str, limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """返回该会话最近 N 条摘要（新→旧），供 SessionSummaryProvider 注入。"""
+        return await self._sqlite.query_recent_summaries(session_id, limit=limit)
+
+    async def count_summaries(self, session_id: str) -> int:
+        """该会话已有摘要数（反射触发节流）。"""
+        return await self._sqlite.count_summaries(session_id)
+
+    # ================================================================
     # 读取路径 —— 语义检索（新增能力）
     # ================================================================
 
@@ -226,12 +298,18 @@ class EpisodicMemory:
         session_id: str | None = None,
         limit: int = 5,
     ) -> list[EpisodicSnapshot]:
-        """基于语义相似度的向量检索 —— 替代旧版关键词 mood 映射。
+        """基于混合检索的记忆召回 —— 语义 + 关键词 + RRF 融合 + 衰减重排。
+
+        v0.5 混合检索（RFC: 反馈闭环同批）:
+        1. 语义腿: ChromaDB 向量相似度（对"上次那种感觉的"类转述查询有效）
+        2. 关键词腿: SQLite LIKE（对原文复述、歌名/艺人名精确召回有效）
+        3. RRF 融合两路排名（k=60），按 id 去重
+        4. 衰减重排: Ebbinghaus 加权分数排序（与旧版一致）
+        ChromaDB 不可用时仍降级到纯 SQLite LIKE（多级降级原则）。
 
         与旧版 query_by_tags() 的关键区别:
         - 旧版: WHERE mood_tag = 'calm'  —— 只能精确匹配标签
-        - 新版: 对 query_text 做向量嵌入，在 ChromaDB 中按余弦相似度排序，
-                同时支持 metadata 精确过滤
+        - 新版: 混合召回 + metadata 精确过滤，语义与关键词互补
 
         使用示例:
             # "下雨天适合听的" 语义匹配到 rainy/jazz 相关的历史交互
@@ -262,12 +340,17 @@ class EpisodicMemory:
             genre_tag=genre_tag, session_id=session_id,
         )
 
-        # --- ChromaDB 向量检索（拉取更多候选供衰减重排） ---
+        # --- 混合召回：语义腿 + 关键词腿 → RRF 融合 ---
         fetch_count = max(limit * 3, 15)
         try:
-            candidates = await self._chroma.semantic_search(
+            semantic_candidates = await self._chroma.semantic_search(
                 query_text=query_text, where=where_filter, limit=fetch_count,
             )
+            keyword_candidates = await self._sqlite.hybrid_keyword_search(
+                query_text=query_text, limit=max(limit * 2, 8),
+                session_id=session_id,
+            )
+            candidates = rrf_fuse(semantic_candidates, keyword_candidates)[:fetch_count]
         except Exception as exc:
             logger.error("ChromaDB 查询失败，fallback 到 SQLite: %s", exc)
             return await self._fallback_keyword_query(query_text, limit, session_id)

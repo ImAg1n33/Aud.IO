@@ -1,9 +1,9 @@
 import json
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.api._security import normalize_session_id
 from backend.services.assistant_service import AssistantService
@@ -22,6 +22,41 @@ class AgentRequest(BaseModel):
 class AgentResponse(BaseModel):
     reply: dict[str, Any]
     prompt: str
+
+
+class FeedbackRequest(BaseModel):
+    """播放反馈事件 —— 前端播放器上报，校准记忆重要性。"""
+
+    event: Literal["song_started", "song_finished", "song_skipped", "song_failed"]
+    song_id: str = Field(min_length=1, max_length=64)
+    session_id: str | None = None
+    listen_seconds: float | None = Field(default=None, ge=0, le=86400)
+
+
+class FeedbackResponse(BaseModel):
+    ok: bool
+    matched_snapshot_id: int | None = None
+
+
+@router.post("/feedback", response_model=FeedbackResponse)
+async def agent_feedback(payload: FeedbackRequest) -> FeedbackResponse:
+    """接收播放结果反馈（started/finished/skipped/failed）。
+
+    后端据此校准对应记忆快照的 importance_score —— DJ 从用户的真实
+    听歌行为（完整听完 vs 切歌）中学习，而不是只依赖启发式权重。
+    """
+    try:
+        sid = normalize_session_id(payload.session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    matched_id = await assistant_service.episodic_memory.record_play_feedback(
+        session_id=sid,
+        song_id=payload.song_id,
+        event=payload.event,
+        listen_seconds=payload.listen_seconds,
+    )
+    return FeedbackResponse(ok=True, matched_snapshot_id=matched_id)
 
 
 @router.post("/respond", response_model=AgentResponse)

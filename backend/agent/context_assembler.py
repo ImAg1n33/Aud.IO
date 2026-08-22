@@ -262,6 +262,43 @@ class EpisodicMemoryProvider(ContextProvider):
         return "\n".join(lines)
 
 
+class SessionSummaryProvider(ContextProvider):
+    """跨会话记忆提供者 —— 注入本会话之前的 Reflection 摘要。
+
+    v5 Reflection: 每 N 轮把短时对话压成摘要入库，下次会话启动时
+    注入这里，DJ 跨会话不失忆（"上次你说想学吉他来着"）。
+    """
+
+    name = "session_summaries"
+
+    def __init__(self, episodic: EpisodicMemory, limit: int = 3) -> None:
+        self._episodic = episodic
+        self._limit = limit
+
+    async def get_context(self, intent: Intent, user_input: str, metadata: dict[str, Any]) -> str | None:
+        sid = metadata.get("_session_id") if isinstance(metadata, dict) else None
+        if not sid:
+            return None
+        try:
+            summaries = await self._episodic.query_recent_summaries(sid, limit=self._limit)
+        except Exception:
+            return None
+        if not summaries:
+            return None
+
+        lines = ["[Previous sessions — what we've talked about (use naturally, don't announce it)]"]
+        for item in reversed(summaries):  # 旧→新
+            text = str(item.get("summary_text") or "").strip()
+            if not text:
+                continue
+            topics = item.get("topics") or []
+            topic_str = f" (topics: {', '.join(topics)})" if topics else ""
+            lines.append(f"- {text}{topic_str}")
+        if len(lines) == 1:
+            return None
+        return "\n".join(lines)
+
+
 # ============================================================
 # Assembler (RFC-007: user-prompt only — system prompt is caller's concern)
 # ============================================================

@@ -31,6 +31,7 @@ class SessionContext:
         "short_term_memory",
         "memory_manager",
         "context_assembler",
+        "last_summary_turn",
     )
 
     def __init__(self, session_id: str) -> None:
@@ -39,6 +40,8 @@ class SessionContext:
         self.short_term_memory: ConversationMemory = ConversationMemory(max_turns=20)
         self.memory_manager: "MemoryManager | None" = None
         self.context_assembler: "ContextAssembler | None" = None
+        # Reflection 节流：上次摘要时的轮数（0 = 尚未摘要）
+        self.last_summary_turn: int = 0
 
 
 class SessionManager:

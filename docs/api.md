@@ -69,6 +69,36 @@ Non-streaming agent pipeline. Full response returned at once.
 
 ---
 
+## POST /v1/agent/feedback
+
+Playback feedback reporting — the frontend reports what actually happened to a track
+(finished / skipped / failed), and the backend calibrates the corresponding memory
+snapshot's `importance_score`. This is how the DJ learns from real listening behavior.
+
+**Body** (JSON):
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `event` | string | yes | `song_started` / `song_finished` / `song_skipped` / `song_failed` |
+| `song_id` | string | yes | Song ID from the `music` SSE event |
+| `session_id` | string | no | UUID session identifier (same as agent endpoints) |
+| `listen_seconds` | number | no | Seconds listened (reported on finished/skipped) |
+
+**Effects**:
+- `song_finished` → `played_to_completion=1`, `play_count+1`, `importance_score +0.15`
+- `song_skipped` → `skip_count+1`, `importance_score -0.15`
+- `song_started` / `song_failed` → mark `last_feedback` only (no weight change)
+
+**Response** `200`:
+```json
+{"ok": true, "matched_snapshot_id": 42}
+```
+`matched_snapshot_id` is the memory snapshot the event was matched to
+(`null` when the song was never recorded — e.g. legacy rows without `song_id`).
+
+**Errors**: `400` illegal `session_id` · `422` invalid `event` / missing `song_id`.
+
+---
+
 ## POST /v1/agent/respond/stream
 
 Streaming agent pipeline via **Server-Sent Events (SSE)**. Text tokens arrive in real-time for typewriter UI; music data triggers playback.

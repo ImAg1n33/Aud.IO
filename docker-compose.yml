@@ -47,8 +47,8 @@ services:
       - ./backend/data:/app/backend/data
       # .env 只读挂载 —— 供 load_dotenv 查找（main.py 同级），同时 env_file 保证变量已注入
       - ./backend/.env:/app/backend/.env:ro
-      # ChromaDB ONNX 嵌入模型缓存 (79MB, 首次下载后持久化)
-      - ./backend/.chroma_cache:/app/.cache/chroma
+      # 嵌入模型缓存 (ONNX ~80MB / fastembed BGE ~95MB, 首次下载后持久化)
+      - ./backend/.chroma_cache:/app/.cache
 
     networks:
       - audio-net

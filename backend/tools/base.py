@@ -69,6 +69,8 @@ class BaseTool(ABC):
     name: str = ""
     description: str = ""
     parameters: dict[str, Any] = {}
+    # 工具类别（music/weather/tts/general）—— 意图门控决定哪些工具对 LLM 可见
+    category: str = "general"
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> ToolResult:
@@ -80,6 +82,10 @@ class BaseTool(ABC):
             "description": self.description,
             "parameters": self.parameters,
         }
+
+    def to_openai_function_schema(self) -> dict[str, Any]:
+        """OpenAI 原生 function calling 格式（RFC: function calling 重构）。"""
+        return {"type": "function", "function": self.to_json_schema()}
 
     def is_available(self) -> bool:
         """Override to check config/env requirements."""

@@ -37,8 +37,18 @@ class ChromaRepository:
         self._client = chromadb.PersistentClient(path=self._chroma_path)
         self._collection = self._client.get_or_create_collection(
             name="episodes",
-            metadata={"hnsw:space": "cosine"},
+            metadata={
+                "hnsw:space": "cosine",
+                "dim": str(self._embed.dimension),
+            },
         )
+        existing_dim = (self._collection.metadata or {}).get("dim")
+        if existing_dim and existing_dim != str(self._embed.dimension):
+            logger.warning(
+                "向量维度不匹配: collection dim=%s, 当前 provider dim=%s. "
+                "运行 `python scripts/rebuild_embeddings.py` 重建索引。",
+                existing_dim, self._embed.dimension,
+            )
         logger.info(
             "ChromaDB 初始化完成: collection='episodes', path=%s, count=%d",
             self._chroma_path, self._collection.count(),
@@ -65,6 +75,7 @@ class ChromaRepository:
         genre_tag: str | None,
         session_id: str = "default",
         importance_score: float = 0.5,
+        song_id: str | None = None,
     ) -> None:
         """向 ChromaDB collection 写入或更新一条记录（携带向量嵌入）。"""
         try:
@@ -79,6 +90,7 @@ class ChromaRepository:
             _Meta.ASSISTANT_REPLY: assistant_reply[:_Meta.MAX_TEXT_LEN],
             _Meta.SONG_NAME: song_name or "",
             _Meta.SONG_ARTIST: song_artist or "",
+            _Meta.SONG_ID: song_id or "",
             _Meta.MOOD_TAG: mood_tag or "",
             _Meta.WEATHER_TAG: weather_tag or "",
             _Meta.TIME_OF_DAY: time_of_day,

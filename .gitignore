@@ -33,6 +33,9 @@ Thumbs.db
 # Architecture diagnostic reports (local snapshots, periodically regenerated)
 docs/architecture-reports/
 
+# Eval reports (regenerated on every eval run)
+eval/reports/
+
 # IDE (personal workspace settings, not portable)
 .vscode/
 

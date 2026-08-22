@@ -35,6 +35,14 @@ class EpisodicSnapshot:
     access_count: int = 0               # 累计检索命中次数
     last_accessed: str | None = None    # 最近一次被检索的 ISO 时间戳
 
+    # RFC: 反馈闭环字段（v0.5）—— 由播放事件校准重要性
+    song_id: str | None = None          # 歌曲 ID（NetEase），用于反馈事件匹配
+    played_to_completion: int = 0       # 1 = 完整播完（正反馈）
+    listen_duration: float | None = None  # 最近一次播放收听秒数
+    play_count: int = 0                 # 完整播放次数
+    skip_count: int = 0                 # 切歌次数
+    last_feedback: str | None = None    # started / finished / skipped / failed
+
 
 # ================================================================
 # 时间工具函数
@@ -74,6 +82,7 @@ class _Meta:
     ASSISTANT_REPLY = "assistant_reply"
     SONG_NAME = "played_song_name"
     SONG_ARTIST = "played_song_artist"
+    SONG_ID = "song_id"
     MOOD_TAG = "mood_tag"
     WEATHER_TAG = "weather_tag"
     TIME_OF_DAY = "time_of_day"
@@ -96,6 +105,14 @@ def _row_to_snapshot(row: tuple[Any, ...]) -> EpisodicSnapshot:
     access_count = int(row[12]) if len(row) > 12 and row[12] is not None else 0
     last_accessed = str(row[13]) if len(row) > 13 and row[13] is not None else None
 
+    # Feedback fields at indices 14-19 (added by migration v3).
+    song_id = str(row[14]) if len(row) > 14 and row[14] is not None else None
+    played_to_completion = int(row[15]) if len(row) > 15 and row[15] is not None else 0
+    listen_duration = float(row[16]) if len(row) > 16 and row[16] is not None else None
+    play_count = int(row[17]) if len(row) > 17 and row[17] is not None else 0
+    skip_count = int(row[18]) if len(row) > 18 and row[18] is not None else 0
+    last_feedback = str(row[19]) if len(row) > 19 and row[19] is not None else None
+
     return EpisodicSnapshot(
         id=row[0],
         timestamp=row[1],
@@ -111,4 +128,10 @@ def _row_to_snapshot(row: tuple[Any, ...]) -> EpisodicSnapshot:
         importance_score=importance,
         access_count=access_count,
         last_accessed=last_accessed,
+        song_id=song_id,
+        played_to_completion=played_to_completion,
+        listen_duration=listen_duration,
+        play_count=play_count,
+        skip_count=skip_count,
+        last_feedback=last_feedback,
     )

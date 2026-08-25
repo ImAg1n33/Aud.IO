@@ -27,6 +27,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Centralized prompt registry (`prompts.py`) with layered architecture (RFC-007)
 
 ### Changed
+- **前端界面重设计（v0.6 体验）**：
+  - 对话区升级为**气泡消息流**：用户/DJ 消息历史保留可回看，打字机只作用于最新消息
+  - PREV/NEXT 实装：NEXT=快捷指令"换一首"（走 agent 通道并触发切歌反馈），PREV=重播当前曲
+  - MODE 实装：dj / loop（`audio.loop` 循环）/ list；音量滑条（本地记忆）+ 进度条点击跳转
+  - 播放状态可视化：缓冲指示点、加载态、错误块
+  - 空态引导 + 键盘快捷键（Ctrl+K 或 / 聚焦输入、空格播放/暂停）
+  - 会话标识内部化（chat store），移除 props 透传链
+  - chat.js 消息流逻辑抽为纯 reducer（Node 可直接测试，+8 用例）
 - **RFC: function calling 重构** — 移除 `---JSON---` 文本标记协议（`llm_client` / prompts）：
   - `call_llm` / `stream_llm` 支持 OpenAI 原生 `tools` 参数，tool_calls 归一化为
     `{"tool": name, ...args}` 动作 dict（流式分片自动拼接 arguments）

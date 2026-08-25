@@ -173,17 +173,17 @@ Aud.IO/
 │   ├── Dockerfile                      # 多阶段构建 (Node 构建 + Nginx 托管)
 │   ├── nginx.conf                      # Nginx (SPA + /api 反代 + SSE)
 │   └── src/
-│       ├── App.vue                     # 根布局 (83 行, 4 子组件)
+│       ├── App.vue                     # 根布局 + 会话接线 + 键盘快捷键
 │       ├── components/
-│       │   ├── ChatPanel.vue           # SSE 流 + 打字机效果
-│       │   ├── PlayerPanel.vue         # Web Audio 播放器 + 淡入淡出 + 播放反馈埋点
+│       │   ├── ChatPanel.vue           # 气泡消息流 + 歌曲卡片 + 空态引导
+│       │   ├── PlayerPanel.vue         # 播放器 + 进度条/音量/真实控制 (NEXT/PREV/MODE)
 │       │   ├── InputBar.vue            # 用户输入
 │       │   └── DebugPanel.vue          # JSON 调试面板
 │       ├── stores/
-│       │   ├── chat.js                 # SSE 事件处理 + 打字机引擎
+│       │   ├── chat.js                 # 消息流 store + SSE 处理 + 打字机引擎 (纯 reducer 可测)
 │       │   ├── sse-parser.js           # SSE 状态机解析器 (跨 chunk 鲁棒)
 │       │   ├── feedback.js             # ★ 播放反馈上报 (听完/切歌/失败)
-│       │   └── player.js               # Web Audio API + 播放状态
+│       │   └── player.js               # Web Audio API + 播放状态 + 控制
 │       └── style.css                   # Nothing Design 暗/亮双模式
 ├── eval/                               # ★ 评估基线 (golden sets + runners)
 │   ├── golden_intents.json             # 意图 Golden Set (60 用例)

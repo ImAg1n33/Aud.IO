@@ -123,25 +123,118 @@ body {
   color: var(--text-secondary);
 }
 
-/* ----- Response Area (primary) ----- */
-.response-area {
+/* ----- Chat Area (primary) ----- */
+.chat-area {
   flex: 1;
   display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--space-lg) 0;
+}
+
+/* 空态引导 */
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  padding: var(--space-4xl) 0;
+  justify-content: center;
+  gap: var(--space-sm);
+  text-align: center;
   background-image: radial-gradient(circle, var(--border-visible) 1px, transparent 1px);
   background-size: 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
 }
 
-.response-text {
-  font-family: var(--font-body);
-  font-size: 16px;
-  line-height: 1.6;
+.empty-title {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.empty-hint {
+  font-size: 14px;
+  color: var(--text-disabled);
+  margin-top: var(--space-lg);
+}
+
+.empty-examples {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.empty-shortcut {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-disabled);
+  margin-top: var(--space-xl);
+}
+
+/* 消息流 */
+.msg-list {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  overflow-y: auto;
+  padding-right: var(--space-sm);
+}
+
+.msg {
+  max-width: 680px;
+  animation: msg-in var(--dur-normal) var(--ease-out);
+}
+
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.msg-user {
+  align-self: flex-end;
+  text-align: right;
+}
+
+.msg-user .msg-text {
+  display: inline-block;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px 12px 2px 12px;
+  padding: var(--space-sm) var(--space-md);
+  font-size: 14px;
+}
+
+.msg-dj {
+  align-self: flex-start;
+}
+
+.msg-dj .msg-text {
+  display: inline-block;
+  border-left: 2px solid var(--accent);
+  padding-left: var(--space-md);
+  font-size: 15px;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-wrap: break-word;
-  max-width: 640px;
+  color: var(--text-primary);
 }
 
+.msg-error .msg-text {
+  border-left-color: var(--warning);
+}
+
+.msg-error-text {
+  margin-top: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--warning);
+}
+
+/* 打字光标 / 状态点 */
 .cursor {
   display: inline-block;
   width: 1.5px;
@@ -150,6 +243,59 @@ body {
   animation: cursor-blink 1s var(--ease-out) infinite;
   vertical-align: text-bottom;
   margin-left: 1px;
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  height: 1em;
+}
+
+.typing-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  animation: dot-bounce 1.2s var(--ease-out) infinite;
+}
+
+.typing-dots i:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots i:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes dot-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+/* 歌曲卡片（DJ 消息内） */
+.song-card {
+  margin-top: var(--space-sm);
+  border: 1px solid var(--border-visible);
+  border-radius: 12px;
+  padding: var(--space-md);
+  background: var(--surface);
+}
+
+.song-card-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: var(--space-xs);
+}
+
+.song-card-title {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-display);
+}
+
+.song-card-artist {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 2px;
 }
 
 /* ----- Player Panel (secondary) ----- */
@@ -189,6 +335,53 @@ body {
   margin-top: var(--space-md);
   padding-top: var(--space-md);
   border-top: 1px solid var(--border);
+}
+
+/* 进度条 */
+.player-progress {
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  margin-top: var(--space-md);
+  cursor: pointer;
+  position: relative;
+}
+
+.player-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.2s linear;
+}
+
+.player-times {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-disabled);
+  margin-top: var(--space-xs);
+}
+
+/* 缓冲状态点 */
+.buffering-dot {
+  color: var(--warning);
+  animation: cursor-blink 0.8s infinite;
+  margin-left: var(--space-xs);
+}
+
+/* 音量滑条 */
+.player-volume {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.player-volume input[type='range'] {
+  width: 96px;
+  accent-color: var(--accent);
+  background: transparent;
+  cursor: pointer;
 }
 
 .ctrl-btn {

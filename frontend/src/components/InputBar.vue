@@ -1,11 +1,6 @@
 <script setup>
 import { useChatStore } from '../stores/chat'
 
-const props = defineProps({
-  sessionId: { type: String, required: true },
-  currentPlayingTrack: { type: String, default: 'None' },
-})
-
 const chat = useChatStore()
 </script>
 
@@ -15,14 +10,14 @@ const chat = useChatStore()
       <input
         type="text"
         v-model="chat.userInput"
-        @keypress.enter="chat.sendCommand(props.sessionId, props.currentPlayingTrack)"
-        placeholder="What do you want to hear?"
+        @keypress.enter="chat.sendCommand()"
+        placeholder="说点什么，DJ 在听…"
         autocomplete="off"
       />
       <button
         class="send-btn"
         :disabled="chat.isProcessing"
-        @click="chat.sendCommand(props.sessionId, props.currentPlayingTrack)"
+        @click="chat.sendCommand()"
       >
         {{ chat.isProcessing ? '...' : 'SEND' }}
       </button>

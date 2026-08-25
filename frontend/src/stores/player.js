@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { sendFeedback } from './feedback'
+import { sendFeedback } from './feedback.js'
 
 // Non-reactive internals — Web Audio API objects don't benefit from Vue reactivity
 let audioCtx = null
@@ -9,12 +9,18 @@ let audioElement = null
 let playbackStartAt = null   // 当前曲目开始播放的时间戳（反馈时长计算）
 let finishedReported = false // 本曲是否已上报 finished（防止 stop 重复上报 skip）
 
+const VOLUME_KEY = 'aud_io_volume'
+
 export const usePlayerStore = defineStore('player', {
   state: () => ({
     isPlaying: false,
+    isBuffering: false,
     playMode: 'dj',           // 'dj' | 'loop' | 'list'
     currentTrack: /** @type {{name:string, artist:string, mp3_url:string}|null} */ (null),
     trackDisplay: '///',
+    currentTime: 0,
+    duration: 0,
+    volume: 0.8,
   }),
 
   getters: {
@@ -35,6 +41,27 @@ export const usePlayerStore = defineStore('player', {
         gain.connect(audioCtx.destination)
         fadeGain = gain
       }
+
+      // 播放进度 / 缓冲 / 元数据事件
+      audioElement.addEventListener('timeupdate', () => {
+        this.currentTime = audioElement.currentTime || 0
+      })
+      audioElement.addEventListener('loadedmetadata', () => {
+        this.duration = audioElement.duration || 0
+      })
+      audioElement.addEventListener('waiting', () => {
+        this.isBuffering = true
+      })
+      audioElement.addEventListener('playing', () => {
+        this.isBuffering = false
+      })
+
+      // 音量（本地记忆）
+      const saved = Number(localStorage.getItem(VOLUME_KEY))
+      if (!Number.isNaN(saved) && saved >= 0 && saved <= 1) {
+        this.volume = saved
+      }
+      audioElement.volume = this.volume
     },
 
     /** Ensure AudioContext is running (browsers suspend it without user gesture). */
@@ -83,6 +110,8 @@ export const usePlayerStore = defineStore('player', {
       this.isPlaying = true
       this.currentTrack = track
       this.trackDisplay = `♪ ${track.name} - ${track.artist} ♪`
+      this.currentTime = 0
+      this.duration = 0
       playbackStartAt = Date.now()
       finishedReported = false
       sendFeedback('song_started', track)
@@ -101,6 +130,7 @@ export const usePlayerStore = defineStore('player', {
         audioElement.pause()
         audioElement.currentTime = 0
         this.isPlaying = false
+        this.currentTime = 0
       }, 1300)
     },
 
@@ -121,18 +151,41 @@ export const usePlayerStore = defineStore('player', {
       }
     },
 
+    /** MODE: dj / loop / list —— loop 模式下循环播放当前曲 */
     toggleMode() {
       const modes = ['dj', 'loop', 'list']
       const idx = modes.indexOf(this.playMode)
       this.playMode = modes[(idx + 1) % modes.length]
+      if (audioElement) {
+        audioElement.loop = this.playMode === 'loop'
+      }
     },
 
-    prevTrack() {
-      console.log('Previous track — pending')
+    /** PREV：重播当前曲（无历史队列，语义为重播） */
+    async prevTrack() {
+      if (!audioElement || !this.currentTrack) return
+      this.attachAudio(audioElement)
+      await this._ensureAudioRunning()
+      audioElement.currentTime = 0
+      audioElement.play()
+      this.isPlaying = true
+      playbackStartAt = Date.now()
+      finishedReported = false
     },
 
-    nextTrack() {
-      console.log('Next track — pending')
+    /** 音量（0-1，本地记忆） */
+    setVolume(v) {
+      const clamped = Math.min(1, Math.max(0, v))
+      this.volume = clamped
+      if (audioElement) audioElement.volume = clamped
+      localStorage.setItem(VOLUME_KEY, String(clamped))
+    },
+
+    /** 跳转到指定秒 */
+    seek(seconds) {
+      if (!audioElement) return
+      audioElement.currentTime = seconds
+      this.currentTime = seconds
     },
 
     onEnded() {
@@ -143,6 +196,7 @@ export const usePlayerStore = defineStore('player', {
       }
       finishedReported = true
       this.isPlaying = false
+      this.isBuffering = false
       if (this.playMode === 'dj') {
         console.log('DJ mode: song ended, ready for next AI pick')
       }

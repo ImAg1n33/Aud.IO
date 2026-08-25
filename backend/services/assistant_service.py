@@ -11,7 +11,7 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from backend.agent.context_assembler import (
     ContextAssembler,
@@ -74,6 +74,19 @@ class AssistantService:
     # ================================================================
     # Session helpers
     # ================================================================
+
+    # 换歌指令（NEXT 快捷指令等）—— 跳过 Phase 1，直接走带工具的单遍路径
+    SKIP_SIGNALS: ClassVar[list[str]] = [
+        "换一首", "换首", "换一个", "换换", "换点",
+        "下一首", "切歌", "再放一首", "再放", "再来一首",
+        "next", "skip", "change",
+    ]
+
+    @classmethod
+    def _is_skip_request(cls, user_input: str) -> bool:
+        """判断是否为换歌类指令（跳过 Phase 1 预取，直接让 LLM 带工具换一曲）。"""
+        lowered = user_input.strip().lower()
+        return any(sig in lowered for sig in cls.SKIP_SIGNALS)
 
     def _resolve_session(self, session_id: str | None) -> str:
         return session_id.strip() if session_id else str(uuid.uuid4())
@@ -260,9 +273,11 @@ class AssistantService:
         metadata: dict[str, Any] = dict(context or {})
 
         # ═══════════════════════════════════════════════════════════
-        # RFC-003 Two-Pass path — MUSIC_PLAY only
+        # RFC-003 Two-Pass path — 常规 MUSIC_PLAY 播放请求
+        # 换歌指令（换一首/下一首/切歌…）不走 Phase 1 —— 直接进带工具的单遍路径，
+        # 避免"Phase 1 再搜同一首/搜失败后无工具道歉"的死胡同
         # ═══════════════════════════════════════════════════════════
-        if intent == Intent.MUSIC_PLAY:
+        if intent == Intent.MUSIC_PLAY and not self._is_skip_request(user_input):
             # ── Phase 1: Silent pre-fetch ──
             yield self._sse("status", '{"phase":"searching"}')
             song_data = await self._phase1_prefetch(user_input, sid, metadata)
@@ -348,8 +363,12 @@ class AssistantService:
             return
 
         # ═══════════════════════════════════════════════════════════
-        # Single-Pass path — CHITCHAT, WEATHER, UNKNOWN, MUSIC_RECOMMEND
+        # Single-Pass path — CHITCHAT, WEATHER, UNKNOWN, MUSIC_RECOMMEND,
+        # 以及换歌指令（MUSIC_PLAY + skip signal，带工具换一曲）
         # ═══════════════════════════════════════════════════════════
+        if intent == Intent.MUSIC_PLAY:
+            logger.info("Skip request: '%s' → single-pass with tools", user_input)
+
         assembler = self._build_context_assembler(sid)
         user_prompt = await assembler.assemble(
             user_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,

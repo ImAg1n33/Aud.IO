@@ -655,6 +655,62 @@ class TestReflectionTrigger:
         assert hits == []
 
 
+class TestSkipRequest:
+    """换歌指令（NEXT 快捷指令等）跳过 Phase 1，直接走带工具的单遍路径。"""
+
+    def test_skip_signal_detection(self) -> None:
+        from backend.services.assistant_service import AssistantService
+
+        assert AssistantService._is_skip_request("换一首") is True
+        assert AssistantService._is_skip_request("下一首") is True
+        assert AssistantService._is_skip_request("切歌") is True
+        assert AssistantService._is_skip_request("再来一首") is True
+        assert AssistantService._is_skip_request("next") is True
+
+    def test_normal_play_request_not_skip(self) -> None:
+        from backend.services.assistant_service import AssistantService
+
+        assert AssistantService._is_skip_request("来一首周杰伦的晴天") is False
+        assert AssistantService._is_skip_request("播放爵士") is False
+        assert AssistantService._is_skip_request("今天天气怎么样") is False
+
+    @pytest.mark.asyncio
+    async def test_skip_request_goes_single_pass_with_tools(self, service, monkeypatch) -> None:
+        """换歌指令不走 Two-Pass（无 searching 状态、无 Phase 1），直接带工具换一曲。"""
+        TestStrictToolEnforcement._ensure_music_tools()
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            assert kw.get("tools"), "换歌指令必须携带工具"
+            assert kw.get("force_tools") is True
+            yield {"analysis": "", "answer": "来一首别的",
+                   "actions": [{"tool": "search_music", "keyword": "Norah Jones Sunrise"}],
+                   "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_search(keyword: str):
+            return {"id": "1", "name": "Sunrise", "artist": "Norah Jones"}
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return "http://example.com/next.mp3"
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+        monkeypatch.setattr("backend.tools.music_tool.search_first_song", fake_search)
+        monkeypatch.setattr("backend.tools.music_tool.get_song_mp3_url", fake_mp3)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "换一首", {}, session_id="skip-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        # 无 searching/found 状态（未走 Two-Pass Phase 1），直接 music
+        assert "searching" not in event_types
+        assert "music" in event_types
+        assert "done" in event_types
+
+
 class TestStrictToolEnforcement:
     """required 模式偶发不被遵守（模型只输出文本）→ 强制重试一次获得工具调用。"""
 

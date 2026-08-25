@@ -153,11 +153,11 @@ class TestEpisodicMemoryProvider:
     @pytest.mark.asyncio
     async def test_queries_by_mood_proactively(self, episodic_memory) -> None:
         await episodic_memory.store_snapshot(
-            "feeling down", "Playing sad piano.",
+            "今天心情低落想听点悲伤的歌", "来点安静的钢琴。",
             mood_tag="sad", played_song={"name": "Sad Song", "artist": "Pianist"}
         )
         provider = EpisodicMemoryProvider(episodic_memory)
-        # No temporal signal, but "sad" mood matches
+        # No temporal signal, but "sad" mood matches（中文文本——与生产一致，BGE 中文向量可靠）
         result = await provider.get_context(Intent.MUSIC_PLAY, "心情低落想听点悲伤的音乐", {})
         assert result is not None
         assert "Sad Song" in result

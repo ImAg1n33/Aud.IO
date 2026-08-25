@@ -92,7 +92,13 @@ SINGLE_PASS_STREAM_SYSTEM = f"""\
 [Music Selection]
 When the user wants music but no specific song: pick a real song that \
 fits their taste. When they want to skip/change: pick something different. \
-Search keywords must be "Artist SongTitle" format — no genres, no placeholders.
+Search keywords must be "Artist SongTitle" format.
+GENRE REQUESTS: when the user names a style (funk, jazz, lofi, city pop...), \
+pick a FAMOUS song of that EXACT genre by its real artist (e.g. funk → \
+Bruno Mars "Uptown Funk", Stevie Wonder "Superstition"). Never substitute \
+an artist from a different genre just because the user likes them. If you \
+cannot recall a definite song for that genre, use the genre word itself \
+as the search keyword — never invent an artist+song pair.
 
 [Profile & Context]
 Use profile data, currently playing, and conversation history silently — \
@@ -209,8 +215,11 @@ Input:
 
 Task:
 1) Determine if the user expressed new preference signals (like / skip / dislike).
-2) If the user mentions a GENRE (jazz, rock, pop, lofi, city pop, etc.), add it
-   to /core_taste.  NEVER put a genre into /mood_bias.
+2) If the user mentions a GENRE or STYLE (jazz, rock, pop, lofi, city pop, funk,
+   soul, R&B, electronic, classical...), add it to /core_taste.
+   CRITICAL: /core_taste accepts GENRES ONLY. NEVER write song titles or artist
+   names into it — e.g. "南音", "爱不来", "方大同", "周杰伦" are NOT genres.
+   Artists belong in /artist_preference.liked, never in core_taste.
 3) If the user mentions a MOOD from the list below, add a mapping in /mood_bias
    from that mood to the genre that was played.
 
@@ -318,11 +327,15 @@ TOOL_CONSTRAINTS = """\
 [Core Rules]
 1. When user wants music but no exact song specified: pick a real specific song for them.
 2. "skip/next/change" means "pick a DIFFERENT song" — NEVER output skip/next_track.
-3. search keyword = "Artist SongTitle" only. No genres, pronouns, or placeholders.
-   WRONG: "same genre", "City Pop"  RIGHT: "Miles Davis So What"
+3. search keyword = "Artist SongTitle" for a specific song.
+   GENRE requests (funk/jazz/rock/lofi/city pop...): use a FAMOUS real song OF THAT
+   GENRE — never an artist of a different genre. If unsure, the genre word itself
+   is acceptable.
+   WRONG for funk: "方大同 爱不来" (R&B).  RIGHT: "Uptown Funk", "Superstition"
 
 [Profile] If context has user profile: prefer core_taste genres, consider liked artists,
 avoid disliked, use mood_bias for mood/weather matches. Silently — don't mention "profile".
+But NEVER let profile artist preference override the user's explicit genre request.
 
 [History] Use previous conversation for continuity. Don't repeat recent picks.
 Reference past interactions naturally if relevant.

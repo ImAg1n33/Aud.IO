@@ -653,3 +653,86 @@ class TestReflectionTrigger:
         service._maybe_reflect("reflect-low", ctx)
         await asyncio.sleep(0.05)
         assert hits == []
+
+
+class TestStrictToolEnforcement:
+    """required 模式偶发不被遵守（模型只输出文本）→ 强制重试一次获得工具调用。"""
+
+    @staticmethod
+    def _ensure_music_tools() -> None:
+        from backend.tools.base import tool_registry
+        from backend.tools.music_tool import GetMusicUrlTool, SearchMusicTool
+
+        if "search_music" not in tool_registry:
+            tool_registry.register(SearchMusicTool())
+        if "get_music_url" not in tool_registry:
+            tool_registry.register(GetMusicUrlTool())
+
+    @pytest.mark.asyncio
+    async def test_stream_retries_when_model_skips_tool(self, service, monkeypatch) -> None:
+        self._ensure_music_tools()
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
+
+        strict_calls: list[str] = []
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            # 模型违反 required：只输出臆想的失败文本，不调工具
+            yield {"analysis": "", "answer": "这首爵士搜不到，八成版权锁了",
+                   "actions": [], "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
+            strict_calls.append(user_prompt)
+            return {"analysis": "", "answer": "找到了",
+                    "actions": [{"tool": "search_music", "keyword": "Norah Jones Dont Know Why"}],
+                    "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_search(keyword: str):
+            return {"id": "1", "name": "Don't Know Why", "artist": "Norah Jones"}
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return "http://example.com/ok.mp3"
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+        monkeypatch.setattr("backend.services.assistant_service.call_llm", fake_call_llm)
+        # 工具内部走 backend.tools.music_tool 的模块级导入——必须打这里
+        monkeypatch.setattr("backend.tools.music_tool.search_first_song", fake_search)
+        monkeypatch.setattr("backend.tools.music_tool.get_song_mp3_url", fake_mp3)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "有没有推荐的jazz", {}, session_id="strict-stream-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        # 强制重试被触发，且带"先搜索别臆想版权"纠正指令
+        assert len(strict_calls) == 1
+        assert "不要假设版权问题" in strict_calls[0]
+        # 最终出歌（模型第一次的失败文本被真实结果覆盖）
+        assert any("event: music" in e for e in events)
+
+    @pytest.mark.asyncio
+    async def test_non_music_intent_no_strict_retry(self, service, monkeypatch) -> None:
+        strict_calls: list[str] = []
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            yield {"analysis": "", "answer": "你好呀", "actions": [],
+                   "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
+            strict_calls.append(user_prompt)
+            return {"analysis": "", "answer": "ok", "actions": [],
+                    "play_keyword": "", "provider": "t", "model": "m"}
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+        monkeypatch.setattr("backend.services.assistant_service.call_llm", fake_call_llm)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "你好", {}, session_id="strict-chitchat-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        assert strict_calls == []  # 闲聊不触发强制重试
+        assert any("event: done" in e for e in events)

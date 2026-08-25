@@ -175,6 +175,26 @@ class AssistantService:
             )
 
             actions = self._parse_actions_from_reply(reply)
+
+            # tool_choice=required 偶发不被遵守——音乐类意图无工具调用时强制重试一次
+            if force_tools and not actions and tools:
+                strict_input = (
+                    f"{working_input}\n\n[System: 你必须调用 search_music 或 get_music_url "
+                    "工具实际搜索。不要假设版权问题——先搜索，搜到就能放。]"
+                )
+                strict_prompt = await assembler.assemble(
+                    strict_input, intent, metadata,
+                    tool_constraints=TOOL_CONSTRAINTS, session_id=sid,
+                )
+                strict_reply = await call_llm(
+                    NON_STREAMING_SYSTEM, strict_prompt,
+                    tools=tools, force_tools=True,
+                )
+                strict_actions = self._parse_actions_from_reply(strict_reply)
+                if strict_actions:
+                    reply = strict_reply
+                    actions = strict_actions
+
             results = await self.tool_executor.execute_actions(actions)
             final_reply = await self._merge_tool_results(reply, results)
 
@@ -357,6 +377,27 @@ class AssistantService:
 
         # === EXECUTE (with retry loop — RFC-007: streaming path now retries) ===
         actions = self._parse_actions_from_reply(reply)
+
+        # tool_choice=required 偶发不被遵守——模型可能只输出文本，甚至凭空臆想
+        # "版权锁了"。音乐类意图无工具调用 → 强制重试一次，纠正"先搜索再判断"。
+        if force_tools and not actions and tools:
+            strict_input = (
+                f"{user_input}\n\n[System: 你必须调用 search_music 或 get_music_url "
+                "工具实际搜索。不要假设版权问题——先搜索，搜到就能放。]"
+            )
+            strict_prompt = await assembler.assemble(
+                strict_input, intent, metadata,
+                tool_constraints=TOOL_CONSTRAINTS, session_id=sid,
+            )
+            strict_reply = await call_llm(
+                NON_STREAMING_SYSTEM, strict_prompt,
+                tools=tools, force_tools=True,
+            )
+            strict_actions = self._parse_actions_from_reply(strict_reply)
+            if strict_actions:
+                reply = strict_reply
+                actions = strict_actions
+
         results = await self.tool_executor.execute_actions(actions)
         final_reply = await self._merge_tool_results(reply, results)
 

@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **会话级 trace 日志（Agent Observability）**：每次交互写入 `data/conversations.jsonl`
+  （意图/路径/工具调用/音乐/回答/延迟/错误），`scripts/view_conversations.py` 人性化查看——
+  与 `llm_calls.jsonl`（LLM 级）构成双层行为留存，便于复盘与调试
 - **Reflection 会话摘要（v5）** — 跨会话连续性：
   - 每 10 轮对话自动触发 LLM 摘要（`SUMMARY_REFLECTION_SYSTEM`），产出
     {summary, topics, song_signals} 结构化入库（`session_summaries` 表）

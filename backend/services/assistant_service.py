@@ -8,6 +8,7 @@ All prompt text lives in backend.agent.prompts.
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -177,6 +178,7 @@ class AssistantService:
         # === PERCEIVE ===
         intent = await self.intent_classifier.classify_async(user_input)
         metadata: dict[str, Any] = dict(context or {})
+        started = time.monotonic()
 
         profile = ctx.memory_manager.get_profile()
         mood_bias = profile.get("mood_bias", {}) if isinstance(profile, dict) else {}
@@ -261,6 +263,7 @@ class AssistantService:
             )
 
         self._maybe_reflect(sid, ctx)
+        self._trace(sid, user_input, intent, "generate_reply", started, final_reply)
         return final_reply, user_prompt
 
     # ================================================================
@@ -284,6 +287,8 @@ class AssistantService:
         intent = await self.intent_classifier.classify_async(user_input)
         logger.debug("Intent: %s, input: %.60s...", intent.value, user_input)
         metadata: dict[str, Any] = dict(context or {})
+        started = time.monotonic()
+        phase1_missed = False
 
         # ═══════════════════════════════════════════════════════════
         # RFC-003 Two-Pass path — 常规 MUSIC_PLAY 播放请求
@@ -328,6 +333,10 @@ class AssistantService:
                     elif isinstance(chunk, dict):
                         reply = chunk
                         if reply.get("analysis") == "Model call failed.":
+                            self._trace(
+                                sid, user_input, intent, "two_pass",
+                                started, error=reply.get("answer", "Request failed"),
+                            )
                             yield self._sse("error", reply.get("answer", "Request failed"))
                             return
 
@@ -357,6 +366,7 @@ class AssistantService:
                     )
                 )
                 self._maybe_reflect(sid, ctx)
+                self._trace(sid, user_input, intent, "two_pass", started, final_reply)
                 yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
                 return
 
@@ -368,6 +378,7 @@ class AssistantService:
                 user_input,
             )
             yield self._sse("status", '{"phase":"not_found"}')
+            phase1_missed = True
             # 不 return —— 落入下方 Single-Pass 路径（MUSIC_PLAY 时 yield_tokens=False 静默）
 
         # ═══════════════════════════════════════════════════════════
@@ -403,6 +414,11 @@ class AssistantService:
                 reply = chunk
                 if reply.get("analysis") == "Model call failed.":
                     error_msg = reply.get("answer", "Request failed")
+                    self._trace(
+                        sid, user_input, intent,
+                        "single_pass_phase1_miss" if phase1_missed else "single_pass",
+                        started, error=error_msg,
+                    )
                     yield self._sse("error", error_msg)
                     return
 
@@ -533,8 +549,67 @@ class AssistantService:
             )
         )
         self._maybe_reflect(sid, ctx)
+        self._trace(
+            sid, user_input, intent,
+            "single_pass_phase1_miss" if phase1_missed else "single_pass",
+            started, final_reply,
+        )
 
         yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
+
+    # ================================================================
+    # 会话级 trace 日志（Agent Observability）—— data/conversations.jsonl
+    # 记录每次交互的 意图/路径/工具调用/音乐/回答/延迟/错误，用于行为复盘与调试
+    # ================================================================
+
+    @staticmethod
+    def _trace(
+        session_id: str,
+        user_input: str,
+        intent: Intent | None,
+        path: str,
+        started: float,
+        reply: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        """追加一条会话 trace（失败静默，绝不影响主流程）。"""
+        try:
+            from backend.data_config import get_data_dir
+
+            record: dict[str, Any] = {
+                "ts": time.time(),
+                "session_id": session_id,
+                "user_input": user_input[:200],
+                "intent": intent.value if intent is not None else None,
+                "path": path,
+                "latency_ms": round((time.time() - started) * 1000, 1),
+                "tool_calls": [],
+                "music": None,
+                "answer": "",
+                "error": error,
+            }
+            if reply:
+                actions = reply.get("actions") or []
+                record["tool_calls"] = [
+                    {k: v for k, v in a.items() if k in ("tool", "keyword", "song_id")}
+                    for a in actions[:5]
+                    if isinstance(a, dict)
+                ]
+                music = reply.get("music")
+                if isinstance(music, dict):
+                    record["music"] = {
+                        "name": music.get("name"),
+                        "artist": music.get("artist"),
+                        "song_id": music.get("song_id"),
+                    }
+                record["answer"] = str(reply.get("answer", ""))[:300]
+
+            log_dir = get_data_dir()
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with (log_dir / "conversations.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning("会话 trace 写入失败（不影响主流程）: %s", exc)
 
     # ═══════════════════════════════════════════════════════════════
     # RFC-003 helpers

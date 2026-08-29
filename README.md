@@ -75,7 +75,7 @@
 | 数据库迁移 | schema_version 表 + MigrationManager | 版本化、幂等（v1-v5），支持自愈修复历史库缺列 |
 | 音乐服务 | NetEase Cloud Music API | 曲库覆盖广，Cookie 过期自动检测 + 瞬时错误重试 |
 | 工具协议 | 原生 function calling + MCP | OpenAI 标准 tools 协议；MCP（stdio）接入外部工具生态 |
-| 运行时数据 | `backend/data/`（`AUD_IO_DATA_DIR` 可配） | 与源码解耦，Docker volume 单目录映射，备份/迁移明确 |
+| 运行时数据 | `backend/data/`（`AUD_IO_DATA_DIR` 可配） | 与源码解耦，Docker volume 单目录映射，备份/迁移明确；内含双日志：`llm_calls.jsonl`（LLM 级调用）+ `conversations.jsonl`（会话级 trace，`scripts/view_conversations.py` 查看） |
 
 ---
 

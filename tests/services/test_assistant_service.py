@@ -24,7 +24,9 @@ class StubMemoryManager:
 
 
 @pytest.fixture
-def service(tmp_path):
+def service(tmp_path, monkeypatch):
+    # 重定向运行时数据目录（trace/profiles 不污染真实 backend/data）
+    monkeypatch.setattr(settings, "aud_io_data_dir", str(tmp_path))
     svc = AssistantService(episodic_db_path=tmp_path / "episodes.db")
     # Inject stub MemoryManager into the session context for controllable tests
     TEST_SID = "test-session"
@@ -895,6 +897,65 @@ class TestPhase1MissFallthrough:
         assert "music" in event_types
         done_event = [e for e in events if "event: done" in e][0]
         assert "Kill Bill" in done_event
+
+
+class TestConversationTrace:
+    """会话级 trace 日志 —— 交互记录写入 conversations.jsonl。"""
+
+    def test_trace_writes_jsonl(self, monkeypatch, tmp_path) -> None:
+        import json
+        import time
+
+        from backend.agent.intent_classifier import Intent
+        from backend.services.assistant_service import AssistantService
+
+        monkeypatch.setattr(settings, "aud_io_data_dir", str(tmp_path))
+        AssistantService._trace(
+            "s1", "来首轻松的", Intent.MUSIC_RECOMMEND, "single_pass",
+            time.monotonic() - 1.5,
+            reply={
+                "answer": "来点轻松的",
+                "actions": [{"tool": "search_music", "keyword": "Miles Davis So What"}],
+                "music": {"name": "So What", "artist": "Miles Davis", "song_id": "1"},
+            },
+        )
+        log = tmp_path / "conversations.jsonl"
+        assert log.exists()
+        record = json.loads(log.read_text(encoding="utf-8").strip())
+        assert record["session_id"] == "s1"
+        assert record["intent"] == "music_recommend"
+        assert record["path"] == "single_pass"
+        assert record["tool_calls"] == [{"tool": "search_music", "keyword": "Miles Davis So What"}]
+        assert record["music"] == {"name": "So What", "artist": "Miles Davis", "song_id": "1"}
+        assert record["latency_ms"] >= 1000
+        assert record["error"] is None
+
+    def test_trace_error_record(self, monkeypatch, tmp_path) -> None:
+        import json
+        import time
+
+        from backend.agent.intent_classifier import Intent
+        from backend.services.assistant_service import AssistantService
+
+        monkeypatch.setattr(settings, "aud_io_data_dir", str(tmp_path))
+        AssistantService._trace(
+            "s2", "你好", Intent.CHITCHAT, "single_pass",
+            time.monotonic(), error="Model call failed.",
+        )
+        record = json.loads((tmp_path / "conversations.jsonl").read_text(encoding="utf-8").strip())
+        assert record["intent"] == "chitchat"
+        assert record["error"] == "Model call failed."
+        assert record["music"] is None
+        assert record["answer"] == ""
+
+    def test_trace_never_raises_on_bad_dir(self, monkeypatch) -> None:
+        import time
+
+        from backend.agent.intent_classifier import Intent
+        from backend.services.assistant_service import AssistantService
+
+        monkeypatch.setattr(settings, "aud_io_data_dir", "Z:/nonexistent/path")
+        AssistantService._trace("s3", "x", Intent.UNKNOWN, "p", time.monotonic())  # 不应抛异常
 
 
 class TestStrictToolEnforcement:

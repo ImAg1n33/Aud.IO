@@ -130,8 +130,9 @@ async def _get_weather_cached() -> str:
     city = settings.weather_city.strip()
 
     if not _weather_cache["data"]:
-        asyncio.ensure_future(_refresh_weather(city))
-        return ""
+        # 首请求：同步等待一次刷新（~1s），保证第一条消息就有天气上下文
+        await _refresh_weather(city)
+        return _weather_cache["data"]
     elif stale:
         asyncio.ensure_future(_refresh_weather(city))
 

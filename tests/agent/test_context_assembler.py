@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from backend.agent.context_assembler import (
@@ -174,6 +176,45 @@ class TestEpisodicMemoryProvider:
         assert result is not None
         # Count occurrences of "Unique" — should be exactly 1
         assert result.count("Unique") == 1
+
+
+class TestWeatherContext:
+    """天气上下文 —— 首请求同步刷新 + 缓存行为。"""
+
+    @pytest.mark.asyncio
+    async def test_first_request_waits_for_weather(self, monkeypatch) -> None:
+        from backend.agent import context_assembler as ca
+        from backend.config import settings
+
+        monkeypatch.setattr(settings, "weather_city", "Beijing")
+
+        async def fake_refresh(city: str) -> None:
+            ca._weather_cache["data"] = "Sunny +32°C"
+            ca._weather_cache["ts"] = time.monotonic()
+
+        monkeypatch.setattr(ca, "_refresh_weather", fake_refresh)
+        ca._weather_cache["data"] = ""
+        ca._weather_cache["ts"] = 0.0
+
+        weather = await ca._get_weather_cached()
+        assert weather == "Sunny +32°C"  # 首请求也能拿到天气
+
+    @pytest.mark.asyncio
+    async def test_cached_weather_returned(self, monkeypatch) -> None:
+        from backend.agent import context_assembler as ca
+
+        ca._weather_cache["data"] = "Cloudy +20°C"
+        ca._weather_cache["ts"] = time.monotonic()
+
+        refresh_hits = []
+
+        async def fake_refresh(city: str) -> None:
+            refresh_hits.append(city)
+
+        monkeypatch.setattr(ca, "_refresh_weather", fake_refresh)
+        weather = await ca._get_weather_cached()
+        assert weather == "Cloudy +20°C"
+        assert refresh_hits == []  # 缓存新鲜 → 不刷新
 
 
 class TestContextAssembler:

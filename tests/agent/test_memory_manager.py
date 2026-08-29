@@ -15,9 +15,46 @@ class FakePatchMemoryManager(MemoryManager):
         ]
 
 
+class FakeAuditMemoryManager(MemoryManager):
+    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile):
+        return [{"op": "add", "path": "/artist_preference/liked/-", "value": "陈奕迅"}]
+
+
 class FakeNoChangeMemoryManager(MemoryManager):
     async def _request_patch_from_model(self, user_input, assistant_reply, old_profile):
         return []
+
+
+@pytest.mark.asyncio
+async def test_audit_log_records_patch_content(tmp_path, monkeypatch) -> None:
+    """审计日志记录 patch 内容摘要 —— '这条偏好怎么进来的' 可追踪。"""
+    from backend.config import settings
+
+    monkeypatch.setattr(settings, "aud_io_data_dir", str(tmp_path))
+
+    profile_path = tmp_path / "user_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "core_taste": [],
+                "artist_preference": {"liked": [], "disliked": []},
+                "mood_bias": {},
+                "last_updated": "2026-01-01T00:00:00Z",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    manager = FakeAuditMemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+    await manager.async_update_profile("陈奕迅的歌太好听了", "记下了")
+
+    log = tmp_path / "memory_update.log"
+    assert log.exists()
+    last = json.loads(log.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert last["status"] == "updated"
+    assert last["patch_summary"][0]["path"] == "/artist_preference/liked/-"
+    assert "陈奕迅" in last["patch_summary"][0]["value"]
 
 
 @pytest.mark.asyncio

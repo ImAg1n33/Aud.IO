@@ -92,6 +92,15 @@ class MemoryManager:
             {
                 "status": "updated",
                 "patch_count": len(patch_ops),
+                # patch 内容摘要（截断）—— 可追踪"这条偏好怎么进来的"
+                "patch_summary": [
+                    {
+                        "op": str(p.get("op", "")),
+                        "path": str(p.get("path", "")),
+                        "value": str(p.get("value", ""))[:40],
+                    }
+                    for p in patch_ops[:10]
+                ],
                 "last_updated": validated.last_updated,
             },
         )

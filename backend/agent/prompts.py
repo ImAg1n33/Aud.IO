@@ -222,7 +222,14 @@ Input:
 2) A completed conversation turn (user_input + assistant_reply)
 
 Task:
-1) Determine if the user expressed new preference signals (like / skip / dislike).
+1) Determine if the user expressed a PREFERENCE SIGNAL:
+   POSITIVE (明确夸赞/持久的喜好，如"喜欢""好听""不错""爱了""单曲循环"
+   "就喜欢这种""多放点XXX的""太好听了") → 艺人进 /artist_preference.liked；
+   流派进 /core_taste；心情+流派进 /mood_bias。
+   NEGATIVE (明确厌恶，如"不喜欢""难听""别放""换掉") → 艺人进 /artist_preference.disliked。
+   CRITICAL — 点名要歌/搜索请求 不是 偏好信号:
+   "我想听《死神》的ED"、"来一首方大同的歌"、"放周杰伦"、"我要原曲不是翻版" 都只是
+   需求或纠正，不代表用户喜欢该艺人。只有用户对艺人的明确夸赞或持久偏好才算。
 2) If the user mentions a GENRE or STYLE (jazz, rock, pop, lofi, city pop, funk,
    soul, R&B, electronic, classical...), add it to /core_taste.
    CRITICAL: /core_taste accepts GENRES ONLY. NEVER write song titles or artist

@@ -954,7 +954,10 @@ class TestConversationTrace:
         from backend.agent.intent_classifier import Intent
         from backend.services.assistant_service import AssistantService
 
-        monkeypatch.setattr(settings, "aud_io_data_dir", "Z:/nonexistent/path")
+        def boom():
+            raise PermissionError("dir not writable")
+
+        monkeypatch.setattr("backend.data_config.get_data_dir", boom)
         AssistantService._trace("s3", "x", Intent.UNKNOWN, "p", time.monotonic())  # 不应抛异常
 
 

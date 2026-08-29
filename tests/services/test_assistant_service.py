@@ -711,6 +711,62 @@ class TestSkipRequest:
         assert "done" in event_types
 
 
+class TestPhase2Fallback:
+    """模型只调工具无文案 → 音乐先响，Phase 2 生成自然台词（不落模板）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_answer_uses_phase2_dj_line(self, service, monkeypatch) -> None:
+        from backend.agent.intent_classifier import Intent, IntentClassifier
+
+        TestStrictToolEnforcement._ensure_music_tools()
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
+
+        # 强制意图为 MUSIC_RECOMMEND（真实 LLM 可能判成 MUSIC_PLAY，导致走 Two-Pass）
+        async def fake_classify(self, user_input: str):
+            return Intent.MUSIC_RECOMMEND
+
+        monkeypatch.setattr(IntentClassifier, "classify_async", fake_classify)
+
+        calls = {"n": 0}
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # 单遍：只调工具，无文案（required 常见行为）
+                yield {"analysis": "", "answer": "",
+                       "actions": [{"tool": "search_music", "keyword": "Norah Jones Sunrise"}],
+                       "play_keyword": "", "provider": "t", "model": "m"}
+            else:
+                # Phase 2：在前奏上生成的自然台词（多变，非模板）
+                yield "萨克斯一进来，整个人都松了。"
+                yield {"analysis": "", "answer": "萨克斯一进来，整个人都松了。",
+                       "actions": [], "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_search(keyword: str):
+            return {"id": "1", "name": "Sunrise", "artist": "Norah Jones"}
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return "http://example.com/sunrise.mp3"
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+        monkeypatch.setattr("backend.tools.music_tool.search_first_song", fake_search)
+        monkeypatch.setattr("backend.tools.music_tool.get_song_mp3_url", fake_mp3)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "推荐点放松的", {}, session_id="phase2-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        text_events = [e for e in events if "event: text" in e]
+        done_event = [e for e in events if "event: done" in e][0]
+        # Phase 2 台词进入 text 事件与 done，且单遍 + Phase 2 各调一次
+        assert any("萨克斯一进来" in e for e in text_events)
+        assert "萨克斯一进来" in done_event
+        assert calls["n"] == 2
+
+
 class TestStrictToolEnforcement:
     """required 模式偶发不被遵守（模型只输出文本）→ 强制重试一次获得工具调用。"""
 
@@ -726,8 +782,15 @@ class TestStrictToolEnforcement:
 
     @pytest.mark.asyncio
     async def test_stream_retries_when_model_skips_tool(self, service, monkeypatch) -> None:
+        from backend.agent.intent_classifier import Intent, IntentClassifier
+
         self._ensure_music_tools()
         monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
+
+        async def fake_classify(self, user_input: str):
+            return Intent.MUSIC_RECOMMEND
+
+        monkeypatch.setattr(IntentClassifier, "classify_async", fake_classify)
 
         strict_calls: list[str] = []
 

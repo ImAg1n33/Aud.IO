@@ -148,6 +148,20 @@ class AssistantService:
             ],
         )
 
+    async def _build_phase2_prompt(
+        self, session_id: str, user_input: str, intent: Intent,
+        metadata: dict[str, Any], song: dict[str, Any],
+    ) -> str:
+        """构建 Phase 2 用户提示词（歌曲已解析，DJ 台词在前奏上生成）。
+
+        Two-Pass 成功路径与单遍路径的空文案兜底共用。
+        """
+        assembler = self._build_phase2_assembler(session_id)
+        return await assembler.assemble(
+            user_input, intent, metadata, resolved_song=song,
+            session_id=session_id,
+        )
+
     # ================================================================
     # Non-streaming pipeline (legacy)
     # ================================================================
@@ -447,11 +461,29 @@ class AssistantService:
         if isinstance(music, dict) and music.get("song_id"):
             yield self._sse("music", json.dumps(music, ensure_ascii=False))
 
-        # 工具 required 模式下文案可能为空 → 模板兜底（不空场）
-        final_reply = self._ensure_dj_line(final_reply)
-        # 兜底文案补发 text 事件（此前 text 事件用 LLM 原文，可能为空）
-        if final_reply.get("answer", "").strip() and not reply.get("answer", "").strip():
-            yield self._sse("text", final_reply["answer"])
+        # 工具 required 模式下模型可能只输出 tool_calls 没有文案 →
+        # 音乐已开播，用 Phase 2 流程（Hitting the Post）在前奏上生成
+        # 自然的 DJ 台词（与 Two-Pass 一致的时序），文案因此多变不模板化
+        if not final_reply.get("answer", "").strip() and isinstance(music, dict) and music.get("name"):
+            phase2_prompt = await self._build_phase2_prompt(
+                sid, user_input, intent, metadata, music,
+            )
+            dj_line = ""
+            async for chunk in stream_llm(PHASE2_STREAM_SYSTEM, phase2_prompt):
+                if isinstance(chunk, str):
+                    dj_line += chunk
+                    yield self._sse("token", chunk)
+                elif isinstance(chunk, dict):
+                    dj_line = chunk.get("answer", "") or dj_line
+            dj_line = dj_line.strip()
+            if dj_line:
+                final_reply["answer"] = dj_line
+                yield self._sse("text", dj_line)
+            else:
+                # LLM 兜底也失败 → 模板兜底（最后手段）
+                final_reply = self._ensure_dj_line(final_reply)
+                if final_reply.get("answer", "").strip():
+                    yield self._sse("text", final_reply["answer"])
 
         # TTS — for CHITCHAT/WEATHER this is the main audio output (no music)
         speech_sse = await self._maybe_yield_speech(

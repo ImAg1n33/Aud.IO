@@ -33,7 +33,6 @@ from backend.agent.prompts import (
     PHASE2_STREAM_SYSTEM,
     SINGLE_PASS_STREAM_SYSTEM,
     TOOL_CONSTRAINTS,
-    build_phase1_fail_user_prompt,
     build_phase1_user_prompt,
     build_retry_feedback,
 )
@@ -361,27 +360,22 @@ class AssistantService:
                 yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
                 return
 
-            # Phase 1 failed — DJ breaks the news naturally
-            logger.info("Phase 1 miss: '%s'", user_input)
+            # Phase 1 failed — 不直接道歉：降级到带工具的单遍容错链
+            # （严格工具重试 → Phase 1 确定性兜底 → Phase 2 台词），
+            # 全部失败时才展示收集到的文案。消除"无工具道歉死胡同"。
+            logger.info(
+                "Phase 1 miss: '%s', falling through to single-pass with tools",
+                user_input,
+            )
             yield self._sse("status", '{"phase":"not_found"}')
-
-            fail_user_prompt = build_phase1_fail_user_prompt(user_input)
-            reply = {}
-            async for chunk in stream_llm(SINGLE_PASS_STREAM_SYSTEM, fail_user_prompt):
-                if isinstance(chunk, str):
-                    yield self._sse("token", chunk)
-                elif isinstance(chunk, dict):
-                    reply = chunk
-            yield self._sse("text", reply.get("answer", ""))
-            yield self._sse("done", json.dumps(reply, ensure_ascii=False))
-            return
+            # 不 return —— 落入下方 Single-Pass 路径（MUSIC_PLAY 时 yield_tokens=False 静默）
 
         # ═══════════════════════════════════════════════════════════
         # Single-Pass path — CHITCHAT, WEATHER, UNKNOWN, MUSIC_RECOMMEND,
-        # 以及换歌指令（MUSIC_PLAY + skip signal，带工具换一曲）
+        # 换歌指令（MUSIC_PLAY + skip signal），以及 Phase 1 失败的 MUSIC_PLAY
         # ═══════════════════════════════════════════════════════════
         if intent == Intent.MUSIC_PLAY:
-            logger.info("Skip request: '%s' → single-pass with tools", user_input)
+            logger.info("MUSIC_PLAY via single-pass (skip or phase-1 miss): '%s'", user_input)
 
         assembler = self._build_context_assembler(sid)
         user_prompt = await assembler.assemble(
@@ -391,6 +385,10 @@ class AssistantService:
         tools = self._build_tool_schemas(intent)
         force_tools = intent in {Intent.MUSIC_PLAY, Intent.MUSIC_RECOMMEND}
 
+        # 音乐类意图：预取期间不流式展示模型文案——模型文本可能虚构"版权锁了"
+        # 或模板化，音乐解析后一律由 Phase 2 生成最终台词（与 Two-Pass 一致的时序）
+        yield_tokens = not force_tools
+
         reply: dict[str, Any] = {}
 
         async for chunk in stream_llm(
@@ -398,7 +396,9 @@ class AssistantService:
             tools=tools, force_tools=force_tools,
         ):
             if isinstance(chunk, str):
-                yield self._sse("token", chunk)
+                if yield_tokens:
+                    yield self._sse("token", chunk)
+                # 静默模式：文本暂存于 reply.answer，音乐解析失败时才作为最后手段
             elif isinstance(chunk, dict):
                 reply = chunk
                 if reply.get("analysis") == "Model call failed.":
@@ -406,10 +406,12 @@ class AssistantService:
                     yield self._sse("error", error_msg)
                     return
 
-        yield self._sse("text", reply.get("answer", ""))
+        if yield_tokens:
+            yield self._sse("text", reply.get("answer", ""))
 
         # === EXECUTE (with retry loop — RFC-007: streaming path now retries) ===
         actions = self._parse_actions_from_reply(reply)
+        song_data_fallback: dict[str, Any] | None = None
 
         # tool_choice=required 偶发不被遵守——模型可能只输出文本，甚至凭空臆想
         # "版权锁了"。音乐类意图无工具调用 → 强制重试一次，纠正"先搜索再判断"。
@@ -430,9 +432,22 @@ class AssistantService:
             if strict_actions:
                 reply = strict_reply
                 actions = strict_actions
+            else:
+                # 模型两次拒绝调工具 → Phase 1 确定性路径兜底：
+                # JSON 提取 play_keyword → 直接搜索（不依赖工具调用协议）
+                logger.info(
+                    "Strict retry refused tools, Phase-1 deterministic fallback: '%s'",
+                    user_input,
+                )
+                song_data_fallback = await self._phase1_prefetch(
+                    user_input, sid, metadata,
+                )
 
         results = await self.tool_executor.execute_actions(actions)
         final_reply = await self._merge_tool_results(reply, results)
+
+        if song_data_fallback:
+            final_reply["music"] = song_data_fallback
 
         retry_count = 0
         while self._collect_retry_contexts(results):
@@ -461,10 +476,11 @@ class AssistantService:
         if isinstance(music, dict) and music.get("song_id"):
             yield self._sse("music", json.dumps(music, ensure_ascii=False))
 
-        # 工具 required 模式下模型可能只输出 tool_calls 没有文案 →
-        # 音乐已开播，用 Phase 2 流程（Hitting the Post）在前奏上生成
+        # 音乐已开播：文案为空（required 只出 tool_calls）或音乐意图静默预取
+        # （模型文本不可靠）→ 用 Phase 2 流程（Hitting the Post）在前奏上生成
         # 自然的 DJ 台词（与 Two-Pass 一致的时序），文案因此多变不模板化
-        if not final_reply.get("answer", "").strip() and isinstance(music, dict) and music.get("name"):
+        music_resolved = isinstance(music, dict) and bool(music.get("name"))
+        if music_resolved and (not final_reply.get("answer", "").strip() or not yield_tokens):
             phase2_prompt = await self._build_phase2_prompt(
                 sid, user_input, intent, metadata, music,
             )
@@ -481,6 +497,14 @@ class AssistantService:
                 yield self._sse("text", dj_line)
             else:
                 # LLM 兜底也失败 → 模板兜底（最后手段）
+                final_reply = self._ensure_dj_line(final_reply)
+                if final_reply.get("answer", "").strip():
+                    yield self._sse("text", final_reply["answer"])
+        elif not yield_tokens and not music_resolved:
+            # 音乐意图且最终无音乐（所有兜底失败）→ 补发收集到的文案（最后手段）
+            if final_reply.get("answer", "").strip():
+                yield self._sse("text", final_reply["answer"])
+            else:
                 final_reply = self._ensure_dj_line(final_reply)
                 if final_reply.get("answer", "").strip():
                     yield self._sse("text", final_reply["answer"])

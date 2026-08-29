@@ -680,9 +680,13 @@ class TestSkipRequest:
         TestStrictToolEnforcement._ensure_music_tools()
         monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
 
+        stream_calls = {"n": 0}
+
         async def fake_stream(system_prompt: str, user_prompt: str, **kw):
-            assert kw.get("tools"), "换歌指令必须携带工具"
-            assert kw.get("force_tools") is True
+            stream_calls["n"] += 1
+            if stream_calls["n"] == 1:
+                assert kw.get("tools"), "换歌指令必须携带工具"
+                assert kw.get("force_tools") is True
             yield {"analysis": "", "answer": "来一首别的",
                    "actions": [{"tool": "search_music", "keyword": "Norah Jones Sunrise"}],
                    "play_keyword": "", "provider": "t", "model": "m"}
@@ -765,6 +769,132 @@ class TestPhase2Fallback:
         assert any("萨克斯一进来" in e for e in text_events)
         assert "萨克斯一进来" in done_event
         assert calls["n"] == 2
+
+
+class TestPhase1DeterministicFallback:
+    """模型两次拒绝工具调用 → Phase 1 确定性搜索路径兜底出歌。"""
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_phase1_when_tools_refused(self, service, monkeypatch) -> None:
+        from backend.agent.intent_classifier import Intent, IntentClassifier
+
+        TestStrictToolEnforcement._ensure_music_tools()
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
+
+        async def fake_classify(self, user_input: str):
+            return Intent.MUSIC_RECOMMEND
+
+        monkeypatch.setattr(IntentClassifier, "classify_async", fake_classify)
+
+        calls = {"stream": 0, "llm": 0}
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            calls["stream"] += 1
+            if calls["stream"] == 1:
+                # 主流：只输出虚构失败文本，不调工具
+                yield {"analysis": "", "answer": "哎，那首没找到，估计版权锁了。",
+                       "actions": [], "play_keyword": "", "provider": "t", "model": "m"}
+            else:
+                # Phase 2：自然台词
+                yield "Frank Ocean 的《Pink + White》，慵懒又细腻，正好配休息。"
+                yield {"analysis": "", "answer": "Frank Ocean 的《Pink + White》，慵懒又细腻，正好配休息。",
+                       "actions": [], "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
+            calls["llm"] += 1
+            if calls["llm"] == 1:
+                # 严格重试：仍拒绝调工具
+                return {"analysis": "", "answer": "", "actions": [],
+                        "play_keyword": "", "provider": "t", "model": "m"}
+            # Phase 1 决策：给出 play_keyword
+            return {"analysis": "", "answer": "", "actions": [],
+                    "play_keyword": "Frank Ocean Pink + White", "provider": "t", "model": "m"}
+
+        async def fake_search(keyword: str):
+            return {"id": "1", "name": "Pink + White", "artist": "Frank Ocean"}
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return "http://example.com/pinkwhite.mp3"
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+        monkeypatch.setattr("backend.services.assistant_service.call_llm", fake_call_llm)
+        monkeypatch.setattr("backend.services.assistant_service.search_first_song", fake_search)
+        monkeypatch.setattr("backend.services.assistant_service.get_song_mp3_url", fake_mp3)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "工作休息期间想听放松的R&B", {}, session_id="phase1-fb-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        # 严格重试 + Phase 1 决策各一次 LLM 调用
+        assert calls["llm"] == 2
+        # 最终出歌（Phase 1 确定性兜底），虚构失败文本被 Phase 2 台词替换
+        assert any("event: music" in e for e in events)
+        done_event = [e for e in events if "event: done" in e][0]
+        assert "Pink + White" in done_event
+        assert any("慵懒又细腻" in e for e in events)
+
+
+class TestPhase1MissFallthrough:
+    """MUSIC_PLAY Phase 1 失败 → 不再直接道歉，降级单遍容错链出歌。"""
+
+    @pytest.mark.asyncio
+    async def test_phase1_miss_falls_through_to_single_pass(self, service, monkeypatch) -> None:
+        from backend.agent.intent_classifier import Intent, IntentClassifier
+
+        TestStrictToolEnforcement._ensure_music_tools()
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
+
+        async def fake_classify(self, user_input: str):
+            return Intent.MUSIC_PLAY
+
+        monkeypatch.setattr(IntentClassifier, "classify_async", fake_classify)
+
+        async def fake_prefetch(user_input: str, sid: str, metadata: dict):
+            return None  # Phase 1 失败
+
+        monkeypatch.setattr(service, "_phase1_prefetch", fake_prefetch)
+
+        stream_calls = {"n": 0}
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            stream_calls["n"] += 1
+            if stream_calls["n"] == 1:
+                # 单遍：带工具成功出动作
+                yield {"analysis": "", "answer": "",
+                       "actions": [{"tool": "search_music", "keyword": "SZA Kill Bill"}],
+                       "play_keyword": "", "provider": "t", "model": "m"}
+            else:
+                yield "SZA 的《Kill Bill》，慵懒又细腻，正好配休息。"
+                yield {"analysis": "", "answer": "SZA 的《Kill Bill》，慵懒又细腻，正好配休息。",
+                       "actions": [], "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_search(keyword: str):
+            return {"id": "1", "name": "Kill Bill", "artist": "SZA"}
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return "http://example.com/killbill.mp3"
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+        monkeypatch.setattr("backend.tools.music_tool.search_first_song", fake_search)
+        monkeypatch.setattr("backend.tools.music_tool.get_song_mp3_url", fake_mp3)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "工作休息期间，想听能让人放松的R&B", {}, session_id="phase1-miss-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        # 先 searching/not_found（Phase 1 失败），随后单遍出歌
+        assert "status" in event_types
+        assert any('"phase":"not_found"' in e for e in events)
+        assert "music" in event_types
+        done_event = [e for e in events if "event: done" in e][0]
+        assert "Kill Bill" in done_event
 
 
 class TestStrictToolEnforcement:

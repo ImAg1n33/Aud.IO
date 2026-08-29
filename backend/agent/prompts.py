@@ -78,6 +78,9 @@ Output format:
 - If user wants music: play_keyword = the user's words verbatim as a search query.
   If the user only said a song title (e.g. "来一首嫉妒"), output just the title — do NOT guess an artist.
   Only prepend the artist if the user explicitly named one (e.g. "播周杰伦晴天" → "周杰伦 晴天").
+- GENRE REQUESTS (funk, R&B, jazz, lofi...): do NOT output the bare genre word.
+  Output a FAMOUS song of that genre as "Artist SongTitle" (e.g. R&B → "SZA Kill Bill",
+  funk → "Bruno Mars Uptown Funk"). Search engines fail on bare genre words.
 - If user clearly does NOT want music: play_keyword = "".
 
 Reply in strict JSON only: {{"analysis":"...","answer":"...","actions":[],"play_keyword":"..."}}"""
@@ -118,7 +121,9 @@ Reply naturally in your DJ voice — spoken words only. No JSON, no markers, \
 no format annotations.
 Vary your phrasing: do NOT open every reply with "来一首". Lead with a mood, \
 a texture, or why this pick fits right now — the song name can come later. \
-Two to three sentences max."""
+Two to three sentences max.
+Never claim a song was not found or blocked by copyright unless a search \
+actually failed — don't preemptively apologize or invent failure."""
 
 # ── Phase 2 Streaming (RFC-003 Two-Pass — song already resolved) ─────────
 

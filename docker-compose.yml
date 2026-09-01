@@ -47,6 +47,8 @@ services:
       - ./backend/data:/app/backend/data
       # .env 只读挂载 —— 供 load_dotenv 查找（main.py 同级），同时 env_file 保证变量已注入
       - ./backend/.env:/app/backend/.env:ro
+      # CHANGELOG 只读挂载 —— 版本号单一真相源（main._read_version 解析最新发布版本）
+      - ./CHANGELOG.md:/app/CHANGELOG.md:ro
       # 嵌入模型缓存 (ONNX ~80MB / fastembed BGE ~95MB, 首次下载后持久化)
       - ./backend/.chroma_cache:/app/.cache
 

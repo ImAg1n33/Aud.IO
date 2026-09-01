@@ -92,6 +92,24 @@ pytest
 # If it catches anything, fix it before committing.
 ```
 
+## Documentation sync checklist
+
+Docs live in the same commit as the code that changes them — small deltas, no "I'll update docs later". Only these triggers require doc updates; everything else stays untouched:
+
+| If your change… | Then update… |
+|-----------------|--------------|
+| Adds a user-visible capability | `README.md` (features table) + `CHANGELOG.md` |
+| Adds/changes an endpoint or SSE event | `docs/api.md` (semantics only — field lists belong to `/docs` auto-schema) |
+| Adds/changes an env var or a third-party outbound call | `backend/.env.example` + `README.md` (data-outbound table) |
+| Changes the pipeline, fallback chain, or storage layout | `docs/architecture.md` |
+| Changes anything released | `CHANGELOG.md` (the version single source of truth) |
+
+Guidelines:
+
+- **Write invariants, not volatile facts.** Semantic rules and "why" belong in docs; numbers that drift (test counts, line counts, latencies) do not.
+- **`CHANGELOG.md` is the release entry point** — on release, promote `[Unreleased]` to a version; `backend/main.py` reads the version from it automatically.
+- **Verify the one-command test before a release**: fresh clone → follow README → running system.
+
 ## Architecture decisions
 
 Start with [`docs/architecture.md`](docs/architecture.md) — it covers the request pipeline,

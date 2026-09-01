@@ -127,6 +127,18 @@ cd frontend && npm install && npm run dev
 
 ---
 
+## 📚 文档导航
+
+| 文档 | 给谁看 | 内容 |
+|------|--------|------|
+| [docs/architecture.md](docs/architecture.md) | 想读懂代码的人 | 请求管线、组件地图、迁移历史、部署约束 |
+| [docs/api.md](docs/api.md) | 对接/二开的人 | 端点用途、SSE 事件序列、反馈校准规则（字段细节见 `/docs` 自动 schema） |
+| [docs/security-playbook.md](docs/security-playbook.md) | 部署者 | 密钥管理、泄露应急、提交防护 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 想参与的人 | 环境搭建、测试、**文档同步清单**、PR 约定 |
+| `GET /docs` · `GET /redoc` | 所有人 | FastAPI 自动生成的完整 API Reference |
+
+---
+
 ## 📂 项目导览
 
 ```

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-01
+
 ### Added
 - **会话级 trace 日志（Agent Observability）**：每次交互写入 `data/conversations.jsonl`
   （意图/路径/工具调用/音乐/回答/延迟/错误），`scripts/view_conversations.py` 人性化查看——

@@ -1,4 +1,5 @@
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -58,7 +59,24 @@ async def _app_lifespan(app: FastAPI):
 # App
 # ================================================================
 
-app = FastAPI(title="Aud.IO API", version="0.3.1", lifespan=_app_lifespan)
+
+def _read_version() -> str:
+    """版本号单一真相源：CHANGELOG.md 中最新的已发布版本。
+
+    此处曾硬编码 "0.3.1"，而 README / 提交历史已推进到 v0.5 —— 两处手工维护
+    必然漂移。改为从 CHANGELOG 解析（跳过 [Unreleased] 段）后，发版时只需更新
+    CHANGELOG，应用版本号自动跟随。文件缺失或无版本标记时回退 "0.0.0"。
+    """
+    changelog = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
+    try:
+        text = changelog.read_text(encoding="utf-8")
+    except OSError:
+        return "0.0.0"
+    match = re.search(r"^## \[(\d+\.\d+\.\d+)\]", text, re.MULTILINE)
+    return match.group(1) if match else "0.0.0"
+
+
+app = FastAPI(title="Aud.IO API", version=_read_version(), lifespan=_app_lifespan)
 
 
 def _parse_cors_origins(value: str | None) -> list[str]:

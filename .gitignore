@@ -42,3 +42,6 @@ eval/reports/
 # Claude Code / Codex (local workspace settings + agent skills)
 .claude/
 .agents/
+
+# WorkBuddy (agent session artifacts — session memory, review reports, handoff notes)
+.workbuddy/

@@ -2,6 +2,12 @@
 
 Base URL: `http://localhost:8001`
 
+> **Looking for the full field-by-field reference?**
+> FastAPI generates it from the code automatically — start the backend and open
+> <http://localhost:8001/docs> (Swagger) or <http://localhost:8001/redoc>.
+> This page documents what a generated schema can't express: what each endpoint is *for*,
+> the SSE event sequence, and the feedback calibration rules.
+
 ---
 
 ## GET /health
@@ -17,20 +23,24 @@ Health check.
 
 ## GET /ready
 
-Readiness check with configuration status.
+Readiness check — reports whether each subsystem is configured and reachable.
+This is the first thing to check when the app starts but behaves oddly.
 
 **Response** `200`:
-```json
-{
-  "ready": true,
-  "version": "0.3.1",
-  "llm": {"provider": "deepseek", "model": "deepseek-v4-flash", "base_url": "https://api.deepseek.com", "configured": true},
-  "embedding": {"provider": "onnx"},
-  "chromadb": {"ok": true, "documents": 42},
-  "netease": {"configured": true},
-  "mcp": {"servers": 0, "tools": 0}
-}
-```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ready` | boolean | Overall readiness flag |
+| `version` | string | Running application version |
+| `llm` | object | `{provider, model, base_url, configured}` — the active LLM backend |
+| `embedding` | object | `{provider}` — one of `local` / `fastembed` / `api` (see `EMBEDDING_PROVIDER`) |
+| `chromadb` | object | `{ok, documents}` — vector store reachability and stored episode count |
+| `netease` | object | `{configured}` — whether the music API base URL or cookie is set |
+| `mcp` | object | `{servers, tools}` — connected MCP servers and adapted tools |
+| `metrics` | object | `{llm_calls_24h: {total, failed, avg_latency_ms}}` — rolling 24h LLM call stats |
+
+These values depend on your `.env`, so they differ per deployment. The live endpoint is the
+authoritative source — prefer it over any example in this file.
 
 ---
 

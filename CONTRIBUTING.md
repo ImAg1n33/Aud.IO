@@ -94,7 +94,13 @@ pytest
 
 ## Architecture decisions
 
-Major changes are documented as RFCs in `docs/architecture-reports/`. If your change touches the agent pipeline, prompt system, memory architecture, or tool layer, consider writing a brief RFC first.
+Start with [`docs/architecture.md`](docs/architecture.md) — it covers the request pipeline,
+the component map, and the reasoning behind the main technology choices.
+
+If your change touches the agent pipeline, prompt system, memory architecture, or tool layer,
+please **open an issue to discuss the approach before writing code**. These areas carry
+non-obvious constraints — the fallback chain in `backend/services/assistant_service.py`
+encodes several hard-won bug fixes, and a short discussion usually saves a rejected PR.
 
 ## Code of Conduct
 

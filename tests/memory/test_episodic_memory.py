@@ -141,9 +141,9 @@ class TestMigrationFramework:
             ).fetchone()
         assert row is not None
 
-    def test_current_schema_version_is_5(self, episodic) -> None:
-        """v1-v5 migrations are all applied."""
-        assert episodic._get_schema_version() == 5
+    def test_current_schema_version_is_6(self, episodic) -> None:
+        """v1-v6 migrations are all applied."""
+        assert episodic._get_schema_version() == 6
 
     def test_decay_columns_exist(self, episodic) -> None:
         """Migration v2 added the decay columns."""
@@ -165,7 +165,7 @@ class TestMigrationFramework:
     def test_migration_idempotent(self, episodic) -> None:
         """Re-running init on an already-migrated DB doesn't break."""
         episodic._run_migrations()
-        assert episodic._get_schema_version() == 5
+        assert episodic._get_schema_version() == 6
 
 
 class TestMemoryDecay:

@@ -1,7 +1,18 @@
 <script setup>
+import { ref } from 'vue'
 import { useChatStore } from '../stores/chat'
+import { sendFeedback } from '../stores/feedback'
 
 const chat = useChatStore()
+
+// 已标记不喜欢的歌曲（组件内状态，页面刷新即重置）
+const dislikedIds = ref(new Set())
+
+function onDislike(song) {
+  if (!song?.song_id || dislikedIds.value.has(song.song_id)) return
+  sendFeedback('song_disliked', song)
+  dislikedIds.value.add(song.song_id)
+}
 </script>
 
 <template>
@@ -36,6 +47,15 @@ const chat = useChatStore()
           <div class="song-card-label">NOW PLAYING</div>
           <div class="song-card-title">{{ msg.song.name }}</div>
           <div class="song-card-artist">{{ msg.song.artist }}</div>
+          <div class="song-card-actions">
+            <button
+              class="song-dislike-btn"
+              :class="{ marked: dislikedIds.has(msg.song.song_id) }"
+              @click="onDislike(msg.song)"
+            >
+              {{ dislikedIds.has(msg.song.song_id) ? '✕ 已标记不喜欢' : '✕ 不喜欢这首' }}
+            </button>
+          </div>
         </div>
 
         <!-- 错误块 -->

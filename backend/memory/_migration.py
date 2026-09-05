@@ -20,7 +20,7 @@ class MigrationManager:
     ChromaDB collection 引用是可选的 —— 仅在需要元数据回填时传入。
     """
 
-    CURRENT_VERSION = 5
+    CURRENT_VERSION = 6
 
     def __init__(
         self,
@@ -35,6 +35,7 @@ class MigrationManager:
             (3, self._migrate_v3_feedback_fields),
             (4, self._migrate_v4_repair_columns),
             (5, self._migrate_v5_session_summaries),
+            (6, self._migrate_v6_dislike_count),
         ]
 
     # ── 初始化 ─────────────────────────────────────────────────────────
@@ -255,4 +256,22 @@ class MigrationManager:
                 CREATE INDEX IF NOT EXISTS idx_summaries_session
                 ON session_summaries(session_id, id DESC)
             """)
+            conn.commit()
+
+    # ── v6: 显式不喜欢计数（拒绝学习） ────────────────────────────────
+
+    def _migrate_v6_dislike_count(self) -> None:
+        """Add dislike_count for explicit dislike feedback (v0.6 拒绝学习).
+
+        与 skip 的语义区分：skip = 当下不想听这首（-0.15）；
+        disliked = 明确厌恶这首/该艺人（-0.3 + 写入画像 disliked）。
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            try:
+                conn.execute(
+                    "ALTER TABLE episodes ADD COLUMN dislike_count "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
             conn.commit()

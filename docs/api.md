@@ -88,7 +88,7 @@ snapshot's `importance_score`. This is how the DJ learns from real listening beh
 **Body** (JSON):
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `event` | string | yes | `song_started` / `song_finished` / `song_skipped` / `song_failed` |
+| `event` | string | yes | `song_started` / `song_finished` / `song_skipped` / `song_disliked` / `song_failed` |
 | `song_id` | string | yes | Song ID from the `music` SSE event |
 | `session_id` | string | no | UUID session identifier (same as agent endpoints) |
 | `listen_seconds` | number | no | Seconds listened (reported on finished/skipped) |
@@ -96,14 +96,18 @@ snapshot's `importance_score`. This is how the DJ learns from real listening beh
 **Effects**:
 - `song_finished` → `played_to_completion=1`, `play_count+1`, `importance_score +0.15`
 - `song_skipped` → `skip_count+1`, `importance_score -0.15`
+- `song_disliked` → `dislike_count+1`, `importance_score -0.30` + artist written into
+  the profile's `disliked` list (deterministic, no LLM interpretation) — future
+  recommendations avoid this artist
 - `song_started` / `song_failed` → mark `last_feedback` only (no weight change)
 
 **Response** `200`:
 ```json
-{"ok": true, "matched_snapshot_id": 42}
+{"ok": true, "matched_snapshot_id": 42, "disliked_artist": null}
 ```
 `matched_snapshot_id` is the memory snapshot the event was matched to
-(`null` when the song was never recorded — e.g. legacy rows without `song_id`).
+(`null` when the song was never recorded). `disliked_artist` is set only for
+`song_disliked` when the artist was newly written into the profile.
 
 **Errors**: `400` illegal `session_id` · `422` invalid `event` / missing `song_id`.
 

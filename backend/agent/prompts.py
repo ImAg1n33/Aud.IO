@@ -241,6 +241,14 @@ Task:
 VALID moods (ONLY these may appear as /mood_bias keys):
 {_MOOD_LIST}
 
+Cross-session context (if provided):
+"recent_session_summaries" are distillations of the user's PREVIOUS sessions.
+Use them to AVOID duplicates and contradictions:
+- Do NOT re-add a preference that is already recorded unless the user
+  re-confirms or strengthens it.
+- If a new signal CONTRADICTS an existing entry (e.g. previously liked,
+  now disliked), prefer the NEWER explicit signal and patch accordingly.
+
 Output rules:
 1) If there are clear changes, return JSON Patch: {{"patch": [...]}}.
 2) If no obvious preference changes, return empty object {{}}.
@@ -292,9 +300,13 @@ def build_memory_observer_messages(
     old_profile: Mapping[str, Any],
     user_input: str,
     assistant_reply: str,
+    summaries: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    """Build messages list (system + user) for the memory observer LLM call."""
-    payload = {
+    """Build messages list (system + user) for the memory observer LLM call.
+
+    summaries: 最近的 Reflection 会话摘要（跨会话整合上下文，防重复/防稀释）。
+    """
+    payload: dict[str, Any] = {
         "user_profile": old_profile,
         "conversation": {
             "user_input": user_input,
@@ -310,6 +322,8 @@ def build_memory_observer_messages(
             ]
         },
     }
+    if summaries:
+        payload["recent_session_summaries"] = summaries
     return [
         {"role": "system", "content": MEMORY_OBSERVER_SYSTEM},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

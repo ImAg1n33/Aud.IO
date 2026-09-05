@@ -323,6 +323,12 @@ class SqliteRepository:
                         "listen_duration = ?, last_feedback = 'skipped' WHERE id = ?",
                         (listen_seconds, row_id),
                     )
+                elif event == "song_disliked":
+                    conn.execute(
+                        "UPDATE episodes SET dislike_count = dislike_count + 1, "
+                        "last_feedback = 'disliked' WHERE id = ?",
+                        (row_id,),
+                    )
                 elif event == "song_started":
                     conn.execute(
                         "UPDATE episodes SET last_feedback = 'started' WHERE id = ?",
@@ -343,6 +349,26 @@ class SqliteRepository:
                 conn.commit()
 
         await asyncio.to_thread(_update)
+
+    def get_song_info(self, row_id: int) -> dict[str, Any] | None:
+        """返回快照的歌曲信息（dislike → 画像写入需要艺人名）。"""
+
+        def _query() -> dict[str, Any] | None:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                row = conn.execute(
+                    "SELECT song_id, played_song_name, played_song_artist "
+                    "FROM episodes WHERE id = ?",
+                    (row_id,),
+                ).fetchone()
+            if not row:
+                return None
+            return {
+                "song_id": str(row[0]) if row[0] else None,
+                "name": str(row[1]) if row[1] else None,
+                "artist": str(row[2]) if row[2] else None,
+            }
+
+        return _query()
 
     async def get_feedback_stats(self, session_id: str | None = None) -> dict[str, Any]:
         """播放反馈聚合统计 —— 衡量推荐质量（播放→完成率）。"""

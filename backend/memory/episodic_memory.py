@@ -60,9 +60,11 @@ class EpisodicMemory:
     """
 
     # 反馈事件对 importance_score 的校准幅度（0.05-0.98 区间内加减）
+    # 语义区分：skip = 当下不想听（-0.15）；disliked = 明确厌恶（-0.3 + 画像联动）
     FEEDBACK_IMPORTANCE_DELTA: dict[str, float] = {
-        "song_finished": 0.15,  # 完整听完 = 正反馈
-        "song_skipped": -0.15,  # 切歌 = 负反馈
+        "song_finished": 0.15,   # 完整听完 = 正反馈
+        "song_skipped": -0.15,   # 切歌 = 负反馈
+        "song_disliked": -0.3,   # 显式不喜欢 = 强负反馈（另联动画像 disliked）
     }
 
     def __init__(
@@ -225,6 +227,8 @@ class EpisodicMemory:
             song_started  —— 播放开始（仅标记，不调权重）
             song_finished —— 完整播完（正反馈：importance +0.15, play_count +1）
             song_skipped  —— 中途切歌（负反馈：importance -0.15, skip_count +1）
+            song_disliked —— 显式不喜欢（强负反馈：-0.3 + dislike_count +1，
+                              调用方应联动画像 disliked 写入）
             song_failed   —— 播放失败（仅标记，用户无过错不降权）
 
         Args:
@@ -250,6 +254,17 @@ class EpisodicMemory:
             event, song_id, row_id, delta,
         )
         return row_id
+
+    async def get_song_info_by_feedback(
+        self, session_id: str, song_id: str,
+    ) -> dict[str, Any] | None:
+        """按会话+歌曲 ID 返回最近一次播放的歌曲信息（dislike → 画像写入用）。"""
+        row_id = await asyncio.to_thread(
+            self._sqlite.find_latest_by_song, session_id, song_id,
+        )
+        if row_id is None:
+            return None
+        return await asyncio.to_thread(self._sqlite.get_song_info, row_id)
 
     async def get_feedback_stats(
         self, session_id: str | None = None,

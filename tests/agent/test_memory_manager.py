@@ -8,7 +8,7 @@ from backend.agent.memory_manager import MemoryManager
 
 
 class FakePatchMemoryManager(MemoryManager):
-    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile):
+    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile, summaries=None):
         return [
             {"op": "add", "path": "/core_taste/-", "value": "jazz"},
             {"op": "add", "path": "/artist_preference/liked/-", "value": "Miles Davis"},
@@ -16,12 +16,22 @@ class FakePatchMemoryManager(MemoryManager):
 
 
 class FakeAuditMemoryManager(MemoryManager):
-    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile):
+    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile, summaries=None):
         return [{"op": "add", "path": "/artist_preference/liked/-", "value": "陈奕迅"}]
 
 
+class FakeCapturingMemoryManager(MemoryManager):
+    """捕获 Observer 收到的 messages，验证 summaries 是否传入。"""
+
+    captured: dict = {}
+
+    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile, summaries=None):
+        FakeCapturingMemoryManager.captured["summaries"] = summaries
+        return []
+
+
 class FakeNoChangeMemoryManager(MemoryManager):
-    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile):
+    async def _request_patch_from_model(self, user_input, assistant_reply, old_profile, summaries=None):
         return []
 
 
@@ -308,3 +318,69 @@ class TestArtistConstraints:
         constraints = manager.get_artist_constraints()
         assert constraints["liked"] == ["A", "B"]
         assert constraints["disliked"] == ["C"]
+
+
+@pytest.mark.asyncio
+async def test_summaries_passed_to_observer(tmp_path) -> None:
+    """画像跨会话整合：Reflection 摘要传入 Observer payload（防重复/防稀释）。"""
+    profile_path = tmp_path / "user_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "core_taste": [],
+                "artist_preference": {"liked": [], "disliked": []},
+                "mood_bias": {},
+                "last_updated": "2026-01-01T00:00:00Z",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    manager = FakeCapturingMemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+    await manager.async_update_profile("推荐点歌", "好的", summaries=["用户偏好 city pop"])
+
+    assert FakeCapturingMemoryManager.captured["summaries"] == ["用户偏好 city pop"]
+
+    # 不传时为 None（payload 不含该字段）
+    await manager.async_update_profile("推荐点歌", "好的")
+    assert FakeCapturingMemoryManager.captured["summaries"] is None
+
+
+def test_add_disliked_artist_deterministic(tmp_path) -> None:
+    """显式 dislike → 确定性写入 disliked（跳过 LLM），去重 + 审计。"""
+    from backend.config import settings
+
+    profile_path = tmp_path / "user_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "core_taste": [],
+                "artist_preference": {"liked": [], "disliked": []},
+                "mood_bias": {},
+                "last_updated": "2026-01-01T00:00:00Z",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkey_target = settings
+    saved = monkey_target.aud_io_data_dir
+    monkey_target.aud_io_data_dir = str(tmp_path)
+    try:
+        manager = MemoryManager(profile_path=profile_path, env_path=tmp_path / ".env")
+        assert manager.add_disliked_artist("讨厌艺人") is True
+        assert manager.add_disliked_artist("讨厌艺人") is False  # 去重
+        assert manager.add_disliked_artist("  ") is False  # 无效输入
+
+        profile = manager.get_profile()
+        assert profile["artist_preference"]["disliked"] == ["讨厌艺人"]
+
+        # 审计可追踪
+        log = tmp_path / "memory_update.log"
+        last = json.loads(log.read_text(encoding="utf-8").strip().splitlines()[-1])
+        assert last["source"] == "explicit_dislike"
+        assert last["patch_summary"][0]["value"] == "讨厌艺人"
+    finally:
+        monkey_target.aud_io_data_dir = saved

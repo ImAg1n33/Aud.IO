@@ -45,16 +45,24 @@ class MemoryManager:
         profile = load_profile(self.profile_path)
         return profile.to_dict()
 
-    async def async_update_profile(self, user_input: str, assistant_reply: str) -> dict[str, Any]:
+    async def async_update_profile(
+        self,
+        user_input: str,
+        assistant_reply: str,
+        summaries: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Asynchronously update profile using a small model and JSON Patch.
 
         Flow: read → model proposes patch → apply → validate with Pydantic → atomic write.
+
+        summaries: 最近的 Reflection 会话摘要（跨会话整合上下文，可选）。
         """
         current_profile = await asyncio.to_thread(self.get_profile)
         patch_ops = await self._request_patch_from_model(
             user_input,
             assistant_reply,
             current_profile,
+            summaries=summaries,
         )
 
         if not patch_ops:
@@ -150,6 +158,45 @@ class MemoryManager:
                     return [str(g).strip() for g in genres if str(g).strip()]
         return []
 
+    def add_disliked_artist(self, artist: str) -> bool:
+        """确定性写入 disliked（显式 dislike 信号，无需 LLM 解读）。
+
+        用户点击"不喜欢"是无歧义信号——跳过 LLM 观察者直接落库，
+        附审计日志。已存在则去重不重复写入。
+
+        Returns:
+            True = 新写入；False = 已存在或无效输入。
+        """
+        artist = artist.strip()
+        if not artist:
+            return False
+
+        profile = self.get_profile()
+        disliked = profile.get("artist_preference", {}).get("disliked", [])
+        if artist in disliked:
+            return False
+
+        updated = {
+            **profile,
+            "artist_preference": {
+                **profile.get("artist_preference", {}),
+                "disliked": [*disliked, artist],
+            },
+        }
+        validated = UserProfile.model_validate(updated)
+        validated.last_updated = _utc_now_iso()
+        atomic_write_json(self.profile_path, validated.to_dict())
+        self._append_audit_log(
+            {
+                "status": "updated",
+                "source": "explicit_dislike",
+                "patch_summary": [
+                    {"op": "add", "path": "/artist_preference/disliked/-", "value": artist}
+                ],
+            }
+        )
+        return True
+
     def get_artist_constraints(self) -> dict[str, list[str]]:
         """Extract liked/disliked artist lists for prompt constraints."""
         profile = self.get_profile()
@@ -170,8 +217,9 @@ class MemoryManager:
         user_input: str,
         assistant_reply: str,
         old_profile: dict[str, Any],
+        summaries: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        messages = build_memory_observer_messages(old_profile, user_input, assistant_reply)
+        messages = build_memory_observer_messages(old_profile, user_input, assistant_reply, summaries=summaries)
 
         try:
             parsed = await request_json_object(messages=messages, model=SLOW_CRITIC_MODEL, temperature=0.1)

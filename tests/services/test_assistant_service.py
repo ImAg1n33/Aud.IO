@@ -19,7 +19,7 @@ class StubMemoryManager:
     def get_preference_summary(self) -> str:
         return "Preferred genres: lofi."
 
-    async def async_update_profile(self, user_input: str, assistant_reply: str):
+    async def async_update_profile(self, user_input: str, assistant_reply: str, summaries=None):
         return {"ok": True, "user_input": user_input, "assistant_reply": assistant_reply}
 
 

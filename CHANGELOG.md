@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Added
+- **拒绝学习（显式 dislike）**：`/feedback` 新增 `song_disliked` 事件 —— 强降权
+  （importance −0.3，区别于 skip 的 −0.15）+ `dislike_count`（migration v6）+
+  确定性写入画像 `artist_preference.disliked`（跳过 LLM 解读，附审计
+  `source: explicit_dislike`）；前端歌曲卡片新增"不喜欢"按钮
+- **画像跨会话整合**：Memory Observer 输入带上最近 Reflection 摘要
+  （防重复添加/防单轮表述稀释），Prompt 增加去重与新旧信号冲突规则
+
 ## [0.5.0] — 2026-09-01
 
 ### Added

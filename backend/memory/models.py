@@ -35,13 +35,14 @@ class EpisodicSnapshot:
     access_count: int = 0               # 累计检索命中次数
     last_accessed: str | None = None    # 最近一次被检索的 ISO 时间戳
 
-    # RFC: 反馈闭环字段（v0.5）—— 由播放事件校准重要性
+        # RFC: 反馈闭环字段（v0.5）—— 由播放事件校准重要性
     song_id: str | None = None          # 歌曲 ID（NetEase），用于反馈事件匹配
     played_to_completion: int = 0       # 1 = 完整播完（正反馈）
     listen_duration: float | None = None  # 最近一次播放收听秒数
     play_count: int = 0                 # 完整播放次数
     skip_count: int = 0                 # 切歌次数
     last_feedback: str | None = None    # started / finished / skipped / failed
+    dislike_count: int = 0              # 显式不喜欢次数（v0.6 拒绝学习）
 
 
 # ================================================================
@@ -105,13 +106,14 @@ def _row_to_snapshot(row: tuple[Any, ...]) -> EpisodicSnapshot:
     access_count = int(row[12]) if len(row) > 12 and row[12] is not None else 0
     last_accessed = str(row[13]) if len(row) > 13 and row[13] is not None else None
 
-    # Feedback fields at indices 14-19 (added by migration v3).
+    # Feedback fields at indices 14-20 (v3 + v6).
     song_id = str(row[14]) if len(row) > 14 and row[14] is not None else None
     played_to_completion = int(row[15]) if len(row) > 15 and row[15] is not None else 0
     listen_duration = float(row[16]) if len(row) > 16 and row[16] is not None else None
     play_count = int(row[17]) if len(row) > 17 and row[17] is not None else 0
     skip_count = int(row[18]) if len(row) > 18 and row[18] is not None else 0
     last_feedback = str(row[19]) if len(row) > 19 and row[19] is not None else None
+    dislike_count = int(row[20]) if len(row) > 20 and row[20] is not None else 0
 
     return EpisodicSnapshot(
         id=row[0],
@@ -134,4 +136,5 @@ def _row_to_snapshot(row: tuple[Any, ...]) -> EpisodicSnapshot:
         play_count=play_count,
         skip_count=skip_count,
         last_feedback=last_feedback,
+        dislike_count=dislike_count,
     )

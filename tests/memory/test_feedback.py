@@ -16,10 +16,10 @@ def episodic(tmp_path) -> EpisodicMemory:
 
 
 class TestFeedbackMigration:
-    def test_schema_version_is_5(self, episodic, tmp_path) -> None:
+    def test_schema_version_is_6(self, episodic, tmp_path) -> None:
         with sqlite3.connect(str(tmp_path / "episodes.db")) as conn:
             row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
-            assert row[0] >= 5
+            assert row[0] >= 6
 
     def test_repair_heals_partial_migration(self, tmp_path) -> None:
         """v4 自愈：缺 last_accessed 的历史库补齐后 INSERT 可用。"""
@@ -48,7 +48,7 @@ class TestFeedbackMigration:
 
         mgr = MigrationManager(db)
         mgr.initialize_tables()
-        assert mgr.get_version() == 5
+        assert mgr.get_version() == 6
 
         with sqlite3.connect(str(db)) as conn:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(episodes)")}
@@ -145,6 +145,28 @@ class TestFeedbackRecording:
         assert snap.last_feedback == "failed"
         assert snap.importance_score == pytest.approx(0.8)  # 用户无过错，不降权
         assert snap.skip_count == 0
+
+    @pytest.mark.asyncio
+    async def test_disliked_is_strong_negative(self, episodic) -> None:
+        """显式不喜欢 = 强负反馈（-0.3）+ dislike_count，区别于 skip（-0.15）。"""
+        await episodic.store_snapshot(
+            "放首测试歌", played_song={"song_id": "123", "name": "X", "artist": "Y"},
+        )
+        await episodic.record_play_feedback("default", "123", "song_disliked")
+
+        snap = (await episodic.query_recent())[0]
+        assert snap.last_feedback == "disliked"
+        assert snap.dislike_count == 1
+        assert snap.importance_score == pytest.approx(0.5)  # 0.8 - 0.3
+
+    @pytest.mark.asyncio
+    async def test_get_song_info_by_feedback(self, episodic) -> None:
+        await episodic.store_snapshot(
+            "放首测试歌", played_song={"song_id": "123", "name": "X", "artist": "Y"},
+        )
+        info = await episodic.get_song_info_by_feedback("default", "123")
+        assert info == {"song_id": "123", "name": "X", "artist": "Y"}
+        assert await episodic.get_song_info_by_feedback("default", "999") is None
 
     @pytest.mark.asyncio
     async def test_unmatched_song_returns_none(self, episodic) -> None:

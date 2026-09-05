@@ -695,10 +695,22 @@ class AssistantService:
     ) -> None:
         sid = self._resolve_session(session_id)
         ctx = self.session_manager.get_or_create(sid)
+
+        # 跨会话整合：Observer 输入带上最近 Reflection 摘要（防重复/防稀释）
+        summaries: list[str] = []
+        try:
+            for item in self.episodic_memory.query_recent_summaries(sid, limit=2):
+                text = str(item.get("summary_text") or "").strip()
+                if text:
+                    summaries.append(text)
+        except Exception:
+            pass  # 摘要缺失不阻断画像更新
+
         background_tasks.add_task(
             ctx.memory_manager.async_update_profile,
             user_input,
             json.dumps(final_reply, ensure_ascii=False),
+            summaries,
         )
 
     # ================================================================

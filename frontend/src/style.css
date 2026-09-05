@@ -298,6 +298,35 @@ body {
   margin-top: 2px;
 }
 
+.song-card-actions {
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.song-dislike-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-disabled);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  padding: 2px 0;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+.song-dislike-btn:hover {
+  color: var(--warning);
+}
+
+.song-dislike-btn.marked {
+  color: var(--accent);
+  cursor: default;
+}
+
 /* ----- Player Panel (secondary) ----- */
 .player-panel {
   background: var(--surface);

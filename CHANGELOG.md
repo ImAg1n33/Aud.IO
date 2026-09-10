@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [Unreleased]
+## [0.7.0] — 2026-09-10
 
 ### Added
 - **挑歌精度（v0.7）**：

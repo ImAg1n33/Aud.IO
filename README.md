@@ -27,11 +27,11 @@
   <tr>
     <td width="50%">
       <h3>🎧 专业 DJ 朋友</h3>
-      <p>不是冷冰冰的播放器指令，也不是字正腔圆的电台播音。Aud.IO 像懂音乐的朋友一样和你对话——说一句"来首轻松的"，它理解你的语境，推荐一首真正合适的歌，用打字机效果说出来，然后自动播放。原生 function calling 让工具调用稳定可靠。</p>
+      <p>不是冷冰冰的播放器指令，也不是字正腔圆的电台播音。Aud.IO 像懂音乐的朋友一样和你对话——说一句"来首轻松的"，它理解你的语境，推荐一首真正合适的歌，用打字机效果说出来，然后自动播放。<b>原生 function calling</b> 让工具调用稳定可靠；<b>挑歌精度</b>覆盖搜索质量（翻唱过滤/原唱优先）、真实音乐关系的相似推荐（"来首类似的"）、以及上一首历史回退。</p>
     </td>
     <td width="50%">
-      <h3>🧠 记忆系统：会学、会记、不失忆</h3>
-      <p><b>会学</b>：完整听完 vs 中途切歌——你的真实听歌行为会校准记忆权重；<b>会记</b>：BGE 中文向量 + 关键词混合检索，加上 Ebbinghaus 衰减重排，说"上次那种感觉的"也能找到；<b>不失忆</b>：每 10 轮对话自动生成会话摘要，下次打开 DJ 还记得你上次的口味。</p>
+      <h3>🧠 记忆系统：会学、会记、会懂、不失忆</h3>
+      <p><b>会学</b>：完整听完 / 中途切歌 / 点"不喜欢"——真实反馈校准记忆权重并联动画像；<b>会记</b>：BGE 中文向量 + 关键词混合检索，加上 Ebbinghaus 衰减重排，说"上次那种感觉的"也能找到；<b>会懂</b>：显式不喜欢会拉黑艺人（播放前硬校验），跨会话画像整合防止偏好被稀释；<b>不失忆</b>：每 10 轮对话自动生成会话摘要，下次打开 DJ 还记得你上次的口味。</p>
     </td>
   </tr>
   <tr>
@@ -53,12 +53,17 @@
 ```
 用户输入 → 意图分类 (Hard Signal → LLM → 关键词) → 上下文组装 (7 个 Provider，含跨会话摘要)
     │                                                         │
-    │  MUSIC_PLAY ──→ Phase 1 静默预取 → Phase 2 DJ 文案 + 音乐播放
-    │  其他意图  ──→ Single-Pass 流式 → 原生 function calling → 工具执行 (版权重试)
+    ├─ "上一首" ──→ 播放历史查询 → 回放上一条 (prev_history，不经 LLM 选曲)
+    │                                                         │
+    │  MUSIC_PLAY ──→ Phase 1 静默预取(搜索质量评分) → Phase 2 DJ 文案 + 音乐播放
+    │  其他意图  ──→ Single-Pass 流式 → 原生 function calling → 工具执行
+    │               (search_music / get_music_url / find_similar)
+    │               容错链: 严格工具重试 → Phase-1 兜底 → Phase-2 台词；版权/无原生版 → 换曲重试
     │                                                         │
     └──→ EpisodicMemory (Facade) ──→ SqliteRepository + ChromaRepository
           │  混合检索 (BGE 语义 + 关键词 RRF) → 衰减重排 → record_access()
-          │  播放反馈 (finished/skipped) → importance_score 校准
+          │  播放反馈 (finished / skipped / disliked / failed) → importance_score 校准
+          │  显式 dislike → 画像 disliked 拉黑 + 播放前硬校验
           └──→ SessionReflector → 每 10 轮会话摘要 → 跨会话注入
 ```
 
@@ -72,7 +77,8 @@
 | SQL 记忆 | SQLite | 双写兼容，SQL 聚合统计，播放反馈信号（听完/切歌）校准记忆权重，语义检索降级回退 |
 | 跨会话记忆 | SessionReflector + session_summaries 表 | 每 10 轮 LLM 摘要入库，新会话自动注入——DJ 跨会话不失忆 |
 | 混合检索 | 语义 Top-K + SQLite LIKE → RRF 融合（k=60）→ 衰减重排 | 转述查询靠向量、原文/歌名/艺人子串靠关键词，两路互补 |
-| 数据库迁移 | schema_version 表 + MigrationManager | 版本化、幂等（v1-v5），支持自愈修复历史库缺列 |
+| 挑歌质量 | 候选评分（原唱/翻唱信号 + 艺人匹配 + 热度）+ `/simi/song` 相似推荐 + disliked 硬校验 | 搜索拉候选集选优而非取第一条（不静默播翻唱）；"类似的"用真实音乐关系数据；拉黑艺人播放前拦截 |
+| 数据库迁移 | schema_version 表 + MigrationManager | 版本化、幂等（v1-v6），支持自愈修复历史库缺列；快照读取按列名映射（与 schema 顺序解耦） |
 | 音乐服务 | NetEase Cloud Music API | 曲库覆盖广，Cookie 过期自动检测 + 瞬时错误重试 |
 | 工具协议 | 原生 function calling + MCP | OpenAI 标准 tools 协议；MCP（stdio）接入外部工具生态 |
 | 运行时数据 | `backend/data/`（`AUD_IO_DATA_DIR` 可配） | 与源码解耦，Docker volume 单目录映射，备份/迁移明确；内含双日志：`llm_calls.jsonl`（LLM 级调用）+ `conversations.jsonl`（会话级 trace，`scripts/view_conversations.py` 查看） |
@@ -166,19 +172,19 @@ Aud.IO/
 │   │   ├── episodic_memory.py          # Facade 编排 + 混合检索 + 反馈闭环
 │   │   ├── _sqlite_repo.py             # SqliteRepository — 纯 SQLite CRUD + 摘要/反馈
 │   │   ├── _chroma_repo.py             # ChromaRepository — 纯向量操作
-│   │   ├── _migration.py               # MigrationManager — 版本化迁移 (v1-v5, 自愈)
-│   │   ├── models.py                   # EpisodicSnapshot + 工具函数
+│   │   ├── _migration.py               # MigrationManager — 版本化迁移 (v1-v6, 自愈)
+│   │   ├── models.py                   # EpisodicSnapshot + 工具函数 (按列名映射)
 │   │   ├── mood_detector.py            # MoodDetector — 中英文心情检测
 │   │   ├── decay.py                    # 衰减公式 (Ebbinghaus 遗忘曲线)
 │   │   ├── fusion.py                   # ★ RRF 混合检索融合
 │   │   ├── reflection.py               # ★ SessionReflector — 会话摘要 (跨会话不失忆)
 │   │   ├── conversation_memory.py      # 短时对话记忆
-│   │   ├── embedding.py                # FastEmbed(BGE) / ONNX / API 向量嵌入
+│   │   ├── embedding.py                # FastEmbed(BGE) / ONNX / API 向量嵌入 (缓存持久化)
 │   │   └── profile_schema.py           # Pydantic 画像验证
 │   └── tools/                          # 工具层
 │       ├── base.py                     # BaseTool + ToolRegistry + 意图门控 (category)
-│       ├── music_tool.py               # 网易云搜索 + MP3 URL 获取
-│       ├── netease_api.py              # 网易云 API + Cookie 过期 + 重试
+│       ├── music_tool.py               # search_music / get_music_url / find_similar (相似推荐)
+│       ├── netease_api.py              # 网易云 API + 搜索质量评分 + simi 相似 + Cookie/重试
 │       ├── mcp_adapter.py              # MCP Client (RFC-001)
 │       └── login_netease.py            # QR 码登录
 ├── frontend/
@@ -187,14 +193,14 @@ Aud.IO/
 │   └── src/
 │       ├── App.vue                     # 根布局 + 会话接线 + 键盘快捷键
 │       ├── components/
-│       │   ├── ChatPanel.vue           # 气泡消息流 + 歌曲卡片 + 空态引导
+│       │   ├── ChatPanel.vue           # 气泡消息流 + 歌曲卡片 + 不喜欢按钮 + 空态引导
 │       │   ├── PlayerPanel.vue         # 播放器 + 进度条/音量/真实控制 (NEXT/PREV/MODE)
 │       │   ├── InputBar.vue            # 用户输入
 │       │   └── DebugPanel.vue          # JSON 调试面板
 │       ├── stores/
 │       │   ├── chat.js                 # 消息流 store + SSE 处理 + 打字机引擎 (纯 reducer 可测)
 │       │   ├── sse-parser.js           # SSE 状态机解析器 (跨 chunk 鲁棒)
-│       │   ├── feedback.js             # ★ 播放反馈上报 (听完/切歌/失败)
+│       │   ├── feedback.js             # ★ 播放反馈上报 (听完/切歌/不喜欢/失败)
 │       │   └── player.js               # Web Audio API + 播放状态 + 控制
 │       └── style.css                   # Nothing Design 暗/亮双模式
 ├── eval/                               # ★ 评估基线 (golden sets + runners)
@@ -203,7 +209,7 @@ Aud.IO/
 │   ├── run_intent_eval.py              # 意图评估 (hybrid/keyword/llm 三模式)
 │   └── run_retrieval_eval.py           # 检索评估 (recall@k / MRR)
 ├── docker-compose.yml                  # 三服务编排
-├── tests/                              # pytest (271 cases) + Node (15 cases)
+├── tests/                              # pytest (329 cases) + Node (23 cases)
 ├── docs/
 │   ├── architecture.md / api.md / security-playbook.md
 ├── .github/workflows/ci.yml            # CI: Python 3.11+3.12, ruff, pytest, eval 报告, secret scan
@@ -220,12 +226,12 @@ Aud.IO/
 
 | 维度 | 实践 |
 |------|------|
-| 测试 | pytest + pytest-asyncio + Node test runner，271 pytest + 15 Node 用例覆盖全部模块 |
-| 评估基线 | 意图 Golden Set（60 用例）+ 检索评估集（12 seeds / 11 queries），keyword 模式 85%，检索 recall@5 81.8% / MRR 0.644（BGE） |
+| 测试 | pytest + pytest-asyncio + Node test runner，**329 pytest + 23 Node** 用例覆盖全部模块 |
+| 评估基线 | 意图 Golden Set（60 用例，hybrid 生产路径 85.0%）+ 检索评估集（12 seeds / 11 queries，recall@5 81.8% / MRR 0.644） |
 | CI | GitHub Actions：Python 3.11 + 3.12 matrix，ruff lint 门禁，意图评估报告 artifact，secret scan |
 | 安全 | Pre-commit Hook 拦截凭证提交，session_id 白名单校验，`.gitignore` 保护运行时数据与 `.env` |
-| 容错 | LLM 流式中断优雅降级，版权歌曲自动换曲重试（最多 2 次），ChromaDB 降级到 SQLite，SSE 跨 chunk 鲁棒，嵌入 API 降级本地模型 |
-| 代码质量 | ruff All checks passed，仓储模式 + Facade 封装，源码与运行时分离，`.env` 加载优先于服务初始化 |
+| 容错 | LLM 流式中断优雅降级，工具链四层兜底（严格重试 → Phase-1 兜底 → Phase-2 台词），版权/无原生版自动换曲（最多 2 次），翻唱过滤（不静默播翻唱），ChromaDB 降级 SQLite，嵌入模型缓存持久化（断网可用） |
+| 代码质量 | ruff All checks passed，仓储模式 + Facade 封装，源码与运行时分离，快照按列名映射（与 schema 顺序解耦） |
 
 ---
 

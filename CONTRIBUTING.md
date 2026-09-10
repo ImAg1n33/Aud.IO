@@ -7,7 +7,7 @@ Thanks for your interest in contributing. Aud.IO is an AI-powered music DJ — a
 ### Prerequisites
 
 - Python 3.11+
-- Node.js 18+
+- Node.js 20+
 - Docker & Docker Compose (optional, for full-stack deployment)
 - A DeepSeek API key (or any OpenAI-compatible provider)
 

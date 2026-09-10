@@ -98,43 +98,58 @@ class _Meta:
 # ================================================================
 
 
-def _row_to_snapshot(row: tuple[Any, ...]) -> EpisodicSnapshot:
-    """将 SQLite 行元组映射为 EpisodicSnapshot。"""
-    # Decay fields are at indices 11-13 (added by migration v2).
-    # Handle pre-migration rows gracefully (fewer columns).
-    importance = float(row[11]) if len(row) > 11 and row[11] is not None else 0.5
-    access_count = int(row[12]) if len(row) > 12 and row[12] is not None else 0
-    last_accessed = str(row[13]) if len(row) > 13 and row[13] is not None else None
+def _row_to_snapshot(row: Any) -> EpisodicSnapshot:
+    """将 SQLite 行映射为 EpisodicSnapshot。
 
-    # Feedback fields at indices 14-20 (v3 + v6).
-    song_id = str(row[14]) if len(row) > 14 and row[14] is not None else None
-    played_to_completion = int(row[15]) if len(row) > 15 and row[15] is not None else 0
-    listen_duration = float(row[16]) if len(row) > 16 and row[16] is not None else None
-    play_count = int(row[17]) if len(row) > 17 and row[17] is not None else 0
-    skip_count = int(row[18]) if len(row) > 18 and row[18] is not None else 0
-    last_feedback = str(row[19]) if len(row) > 19 and row[19] is not None else None
-    dislike_count = int(row[20]) if len(row) > 20 and row[20] is not None else 0
+    v0.7 修复：优先按**列名**读取（sqlite3.Row）——位置映射曾因生产库历史
+    迁移顺序异常（last_accessed 缺列晚补）而错位，把 played_to_completion(0)
+    读成 song_id='0'。名称读取与 schema 顺序无关；tuple 传入时退化为位置读取。
+    """
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
+
+    def _get(name: str, index: int, default: Any = None) -> Any:
+        if keys:
+            return row[name] if name in keys else default
+        return row[index] if len(row) > index else default
+
+    def _as_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    def _as_float(value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _as_str(value: Any) -> str | None:
+        return str(value) if value is not None else None
+
+    importance = _as_float(_get("importance_score", 11))
+    song_id = _as_str(_get("song_id", 14))
 
     return EpisodicSnapshot(
-        id=row[0],
-        timestamp=row[1],
-        user_input=row[2],
-        assistant_reply=row[3],
-        played_song_name=row[4],
-        played_song_artist=row[5],
-        mood_tag=row[6],
-        weather_tag=row[7],
-        time_of_day=row[8],
-        genre_tag=row[9],
+        id=_as_int(_get("id", 0)),
+        timestamp=str(_get("timestamp", 1) or ""),
+        user_input=str(_get("user_input", 2) or ""),
+        assistant_reply=str(_get("assistant_reply", 3) or ""),
+        played_song_name=_as_str(_get("played_song_name", 4)),
+        played_song_artist=_as_str(_get("played_song_artist", 5)),
+        mood_tag=_as_str(_get("mood_tag", 6)),
+        weather_tag=_as_str(_get("weather_tag", 7)),
+        time_of_day=str(_get("time_of_day", 8) or "unknown"),
+        genre_tag=_as_str(_get("genre_tag", 9)),
         similarity_score=None,
-        importance_score=importance,
-        access_count=access_count,
-        last_accessed=last_accessed,
+        importance_score=importance if importance is not None else 0.5,
+        access_count=_as_int(_get("access_count", 12)),
+        last_accessed=_as_str(_get("last_accessed", 13)),
         song_id=song_id,
-        played_to_completion=played_to_completion,
-        listen_duration=listen_duration,
-        play_count=play_count,
-        skip_count=skip_count,
-        last_feedback=last_feedback,
-        dislike_count=dislike_count,
+        played_to_completion=_as_int(_get("played_to_completion", 15)),
+        listen_duration=_as_float(_get("listen_duration", 16)),
+        play_count=_as_int(_get("play_count", 17)),
+        skip_count=_as_int(_get("skip_count", 18)),
+        last_feedback=_as_str(_get("last_feedback", 19)),
+        dislike_count=_as_int(_get("dislike_count", 20)),
     )

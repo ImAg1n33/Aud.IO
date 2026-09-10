@@ -5,6 +5,7 @@ from typing import Any
 
 from backend.tools.base import (
     MusicCopyrightError,
+    MusicUnavailableError,
     ToolExecutionError,
     ToolNotFoundError,
     ToolResult,
@@ -13,7 +14,7 @@ from backend.tools.base import (
 
 logger = logging.getLogger(__name__)
 
-RETRYABLE_ERRORS = (MusicCopyrightError,)
+RETRYABLE_ERRORS = (MusicCopyrightError, MusicUnavailableError)
 
 
 class ToolExecutor:
@@ -84,6 +85,14 @@ class ToolExecutor:
         data = failed_result.data
         song_name = data.get("name") or data.get("requested_keyword")
         target = song_name if isinstance(song_name, str) and song_name.strip() else "the requested song"
+
+        if isinstance(failed_result.error, MusicUnavailableError):
+            return (
+                f"'{target}' only has cover/remix versions available (the original is "
+                "not in the catalog), which are not acceptable to play. "
+                "Please choose a DIFFERENT song — a different title or a different artist."
+            )
+
         return (
             f"The song '{target}' is blocked by copyright and cannot be played. "
             "Please choose a different song — a different artist or a less mainstream track "

@@ -234,3 +234,30 @@ class TestImportanceClamping:
         assert stats["total_finished"] == 2
         assert stats["total_skipped"] == 1
         assert stats["completion_rate"] == pytest.approx(2 / 3)
+
+
+class TestPlayHistory:
+    """v0.7 播放历史（上一首回放的数据源）。"""
+
+    @pytest.mark.asyncio
+    async def test_query_recent_played_order_and_filter(self, episodic) -> None:
+        await episodic.store_snapshot(
+            "第一首", played_song={"song_id": "1", "name": "A", "artist": "X"},
+            session_id="s",
+        )
+        await episodic.store_snapshot("无歌曲的闲聊", session_id="s")  # 无 song_id → 过滤
+        await episodic.store_snapshot(
+            "第二首", played_song={"song_id": "2", "name": "B", "artist": "Y"},
+            session_id="s",
+        )
+        await episodic.store_snapshot(
+            "别的会话", played_song={"song_id": "3", "name": "C", "artist": "Z"},
+            session_id="t",
+        )
+
+        history = await episodic.query_recent_played("s", limit=5)
+        assert [h.song_id for h in history] == ["2", "1"]
+
+    @pytest.mark.asyncio
+    async def test_query_recent_played_empty(self, episodic) -> None:
+        assert await episodic.query_recent_played("nobody") == []

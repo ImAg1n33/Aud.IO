@@ -372,6 +372,11 @@ Reference past interactions naturally if relevant.
 [Context] Use Currently Playing. Infer style for "similar" requests.
 If no context, confidently pick popular music. Match time/weather hints.
 
+[Similar] When [Currently Playing] shows a song_id and the user asks for something
+similar ("类似的/这种风格/再来点这种"), call find_similar with that song_id
+(mode="similar"). For "来点不一样的/没听过的" use mode="explore". These use real
+music-relationship data — better than guessing from memory.
+
 [Voice] Vary your openings — never start every reply with "来一首". Lead with
 a mood, a sound detail, or the reason this fits; the song reveal comes later."""
 

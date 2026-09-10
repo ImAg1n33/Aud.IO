@@ -6,10 +6,16 @@ const player = usePlayerStore()
 const chat = useChatStore()
 
 const NEXT_CMD = '换一首'
+const PREV_CMD = '上一首'
 
 function onNext() {
   // NEXT = 快捷指令走 agent（顺带触发 song_skipped 反馈）
   chat.sendCommand(NEXT_CMD)
+}
+
+function onPrev() {
+  // PREV = 从播放历史回放上一条（v0.7）
+  chat.sendCommand(PREV_CMD)
 }
 
 function formatTime(seconds) {
@@ -49,7 +55,7 @@ function onSeek(e) {
 
     <div class="player-controls">
       <button class="ctrl-btn" @click="player.toggleMode()">MODE: {{ player.playMode.toUpperCase() }}</button>
-      <button class="ctrl-btn" @click="player.prevTrack()">PREV</button>
+      <button class="ctrl-btn" @click="onPrev">PREV</button>
       <button class="ctrl-btn ctrl-play" @click="player.togglePlay()">
         {{ player.isPlaying ? '■' : '▶' }}
       </button>

@@ -9,12 +9,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **挑歌精度（v0.7）**：
+  - 搜索质量评分：拉取候选集（cloudsearch 优先）→ 确定性评分选优
+    （`originCoverType` 原唱/翻唱信号 + 劣质标记惩罚 + 艺人匹配 + 热度），
+    全为翻唱时抛 `NoAcceptableSongError`（可重试换曲）——不再静默播翻唱
+    （实证：`周杰伦 晴天` 首位曾是 RyaVocal 翻唱）
+  - `find_similar` 工具：基于 `/simi/song` 真实音乐关系数据（"来首类似的"/
+    "来点不一样的" mode=explore），非 LLM 猜测
+  - 口味硬约束：播放前校验 disliked 艺人 → 带反馈重试换艺人，仍命中则不播
+  - "上一首"：从播放历史（episodes song_id 维度）回放上一条；前端 PREV 走指令
 - **拒绝学习（显式 dislike）**：`/feedback` 新增 `song_disliked` 事件 —— 强降权
   （importance −0.3，区别于 skip 的 −0.15）+ `dislike_count`（migration v6）+
   确定性写入画像 `artist_preference.disliked`（跳过 LLM 解读，附审计
   `source: explicit_dislike`）；前端歌曲卡片新增"不喜欢"按钮
 - **画像跨会话整合**：Memory Observer 输入带上最近 Reflection 摘要
   （防重复添加/防单轮表述稀释），Prompt 增加去重与新旧信号冲突规则
+
+### Fixed
+- **快照行映射错位**：`_row_to_snapshot` 原来按列位置读取，生产库因历史迁移
+  顺序异常（`last_accessed` 晚补）使 `song_id` 实际位于第 13 列 → 读成
+  `played_to_completion`(0)。改为 `sqlite3.Row` 按列名读取（tuple 兼容回退）
+- **fastembed 缓存易失**：模型默认缓存 `/tmp/fastembed_cache` 不在挂载卷内，
+  容器重建即丢、断网时嵌入停摆（静默降级）。改为显式 `cache_dir`
+  （默认 `~/.cache/fastembed`，容器内即挂载卷路径），已预热持久化
+- **Docker 构建静默失败**：`backend/.dockerignore` 缺失 `data/` 与
+  `.chroma_cache/`（含 HF 符号链接的 270MB 模型缓存被传入构建上下文导致
+  BuildKit 传输失败）；补齐忽略项
 
 ## [0.5.0] — 2026-09-01
 

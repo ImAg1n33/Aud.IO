@@ -82,11 +82,22 @@ class AssistantService:
         "next", "skip", "change",
     ]
 
+    # 上一首指令（PREV 快捷指令）—— 从播放历史回放，不经 LLM 选曲
+    PREV_SIGNALS: ClassVar[list[str]] = [
+        "上一首", "前一首", "上一曲", "previous", "go back",
+    ]
+
     @classmethod
     def _is_skip_request(cls, user_input: str) -> bool:
         """判断是否为换歌类指令（跳过 Phase 1 预取，直接让 LLM 带工具换一曲）。"""
         lowered = user_input.strip().lower()
         return any(sig in lowered for sig in cls.SKIP_SIGNALS)
+
+    @classmethod
+    def _is_previous_request(cls, user_input: str) -> bool:
+        """判断是否为"上一首"回放指令（v0.7 P1-2）。"""
+        lowered = user_input.strip().lower()
+        return any(sig in lowered for sig in cls.PREV_SIGNALS)
 
     def _resolve_session(self, session_id: str | None) -> str:
         return session_id.strip() if session_id else str(uuid.uuid4())
@@ -154,13 +165,171 @@ class AssistantService:
     ) -> str:
         """构建 Phase 2 用户提示词（歌曲已解析，DJ 台词在前奏上生成）。
 
-        Two-Pass 成功路径与单遍路径的空文案兜底共用。
+        Two-Pass 成功路径、单遍空文案兜底、上一首回放共用。
         """
         assembler = self._build_phase2_assembler(session_id)
         return await assembler.assemble(
             user_input, intent, metadata, resolved_song=song,
             session_id=session_id,
         )
+
+    async def _stream_resolved_song(
+        self, sid: str, ctx: Any, user_input: str, intent: Intent,
+        metadata: dict[str, Any], song_data: dict[str, Any],
+        started: float, path: str = "two_pass",
+    ) -> AsyncGenerator[str, None]:
+        """歌曲已解析：music 先发 → Phase 2 台词 → TTS → RECORD → done。
+
+        Two-Pass 成功路径与"上一首"回放共用（v0.7 抽取）。
+        """
+        yield self._sse(
+            "status",
+            json.dumps({
+                "phase": "found",
+                "name": song_data["name"],
+                "artist": song_data["artist"],
+            }, ensure_ascii=False),
+        )
+
+        # Music first — like a DJ dropping the track before speaking
+        yield self._sse("music", json.dumps(song_data, ensure_ascii=False))
+
+        phase2_prompt = await self._build_phase2_prompt(
+            sid, user_input, intent, metadata, song_data,
+        )
+
+        reply: dict[str, Any] = {}
+        async for chunk in stream_llm(PHASE2_STREAM_SYSTEM, phase2_prompt):
+            if isinstance(chunk, str):
+                yield self._sse("token", chunk)
+            elif isinstance(chunk, dict):
+                reply = chunk
+                if reply.get("analysis") == "Model call failed.":
+                    self._trace(
+                        sid, user_input, intent, path,
+                        started, error=reply.get("answer", "Request failed"),
+                    )
+                    yield self._sse("error", reply.get("answer", "Request failed"))
+                    return
+
+        yield self._sse("text", reply.get("answer", ""))
+
+        # TTS pre-roll tag — music is already playing, speech is non-blocking
+        speech_sse = await self._maybe_yield_speech(
+            reply.get("answer", ""), intent.value, is_music_play=True,
+        )
+        if speech_sse:
+            yield speech_sse
+
+        final_reply = {
+            **reply,
+            "music": song_data,
+            "provider": reply.get("provider", ""),
+            "model": reply.get("model", ""),
+        }
+        ctx.short_term_memory.add_turn(
+            user_input, reply.get("answer", ""),
+            intent=str(intent), played_song=song_data,
+        )
+        asyncio.ensure_future(
+            self.episodic_memory.store_snapshot(
+                user_input, reply.get("answer", ""),
+                played_song=song_data, session_id=sid,
+            )
+        )
+        self._maybe_reflect(sid, ctx)
+        self._trace(sid, user_input, intent, path, started, final_reply)
+        yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
+
+    async def _find_previous_song(
+        self, sid: str, metadata: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """查该会话播放历史，返回最近一条 ≠ 当前曲 的歌曲（含 mp3_url）。
+
+        v0.7 P1-2：播放历史在 episodes（song_id 维度），无需额外队列。
+        """
+        try:
+            history = await self.episodic_memory.query_recent_played(sid, limit=10)
+        except Exception:
+            return None
+
+        current_id = str((metadata or {}).get("Currently Playing ID") or "").strip()
+        if current_id:
+            prev = next(
+                (
+                    h for h in history
+                    if h.song_id and str(h.song_id) != current_id
+                ),
+                None,
+            )
+        else:
+            # 前端未上报当前曲 ID 时，取倒数第二条（避免重播当前曲）
+            prev = history[1] if len(history) >= 2 else None
+
+        if prev is None or not prev.song_id or not prev.played_song_name:
+            return None
+
+        try:
+            mp3_url = await get_song_mp3_url(str(prev.song_id))
+        except Exception:
+            return None
+
+        return {
+            "song_id": str(prev.song_id),
+            "name": prev.played_song_name,
+            "artist": prev.played_song_artist or "",
+            "mp3_url": mp3_url,
+            "requested_keyword": "previous",
+        }
+
+    # ================================================================
+    # 口味硬约束（v0.7 P0-2）—— disliked 播放前校验
+    # ================================================================
+
+    @staticmethod
+    def _disliked_artists(ctx: Any) -> list[str]:
+        """该会话画像的 disliked 艺人列表（缺失时为空——不阻断播放）。"""
+        try:
+            return ctx.memory_manager.get_artist_constraints().get("disliked", [])
+        except Exception:
+            return []
+
+    @staticmethod
+    def _matched_disliked(music: Any, disliked: list[str]) -> str | None:
+        """music.artist 命中 disliked（子串，兼容多人拼接）→ 返回命中项。"""
+        if not isinstance(music, dict) or not disliked:
+            return None
+        artist = str(music.get("artist") or "")
+        if not artist:
+            return None
+        for name in disliked:
+            if name and name in artist:
+                return name
+        return None
+
+    async def _retry_for_disliked(
+        self, sid: str, user_input: str, intent: Intent,
+        metadata: dict[str, Any], assembler: ContextAssembler,
+        tools: list[dict[str, Any]], blocked_artist: str,
+    ) -> dict[str, Any] | None:
+        """disliked 命中后的带反馈重试：换一位不同艺人的歌。"""
+        retry_input = (
+            f"{user_input}\n\n[System: 用户明确不喜欢 {blocked_artist}，"
+            "必须换一位不同艺人的歌，不要推荐该艺人。]"
+        )
+        retry_prompt = await assembler.assemble(
+            retry_input, intent, metadata, tool_constraints=TOOL_CONSTRAINTS,
+            session_id=sid,
+        )
+        retry_reply = await call_llm(
+            NON_STREAMING_SYSTEM, retry_prompt, tools=tools, force_tools=True,
+        )
+        retry_actions = self._parse_actions_from_reply(retry_reply)
+        if not retry_actions:
+            return None
+        results = await self.tool_executor.execute_actions(retry_actions)
+        merged = await self._merge_tool_results(retry_reply, results)
+        return merged if merged.get("music") else None
 
     # ================================================================
     # Non-streaming pipeline (legacy)
@@ -291,6 +460,23 @@ class AssistantService:
         phase1_missed = False
 
         # ═══════════════════════════════════════════════════════════
+        # 上一首（v0.7 P1-2）：从播放历史回放该会话的上一条，不经 LLM 选曲
+        # ═══════════════════════════════════════════════════════════
+        if self._is_previous_request(user_input):
+            prev = await self._find_previous_song(sid, metadata)
+            if prev is not None:
+                logger.info(
+                    "Replay previous: %s - %s", prev["artist"], prev["name"],
+                )
+                async for sse in self._stream_resolved_song(
+                    sid, ctx, user_input, intent, metadata, prev,
+                    started, path="prev_history",
+                ):
+                    yield sse
+                return
+            logger.info("Previous-song request but no history: '%s'", user_input)
+
+        # ═══════════════════════════════════════════════════════════
         # RFC-003 Two-Pass path — 常规 MUSIC_PLAY 播放请求
         # 换歌指令（换一首/下一首/切歌…）不走 Phase 1 —— 直接进带工具的单遍路径，
         # 避免"Phase 1 再搜同一首/搜失败后无工具道歉"的死胡同
@@ -300,74 +486,26 @@ class AssistantService:
             yield self._sse("status", '{"phase":"searching"}')
             song_data = await self._phase1_prefetch(user_input, sid, metadata)
 
+            # 口味硬约束（v0.7 P0-2）：Phase 1 直搜命中 disliked 艺人 → 视为未命中
+            if song_data is not None and self._matched_disliked(
+                song_data, self._disliked_artists(ctx),
+            ):
+                logger.info(
+                    "Phase 1 picked disliked artist: %s → fallback",
+                    song_data.get("artist"),
+                )
+                song_data = None
+
             if song_data is not None:
                 logger.info(
                     "Phase 1 OK: '%s' → %s - %s",
                     user_input, song_data["artist"], song_data["name"],
                 )
-                # ── Phase 2: Radio DJ timing ──
-                yield self._sse(
-                    "status",
-                    json.dumps({
-                        "phase": "found",
-                        "name": song_data["name"],
-                        "artist": song_data["artist"],
-                    }, ensure_ascii=False),
-                )
-
-                # Music first — like a DJ dropping the track before speaking
-                yield self._sse("music", json.dumps(song_data, ensure_ascii=False))
-
-                # Build user-prompt while music plays
-                assembler = self._build_phase2_assembler(sid)
-                user_prompt = await assembler.assemble(
-                    user_input, intent, metadata, resolved_song=song_data,
-                    session_id=sid,
-                )
-
-                # Stream DJ script over the already-playing music
-                reply = {}
-                async for chunk in stream_llm(PHASE2_STREAM_SYSTEM, user_prompt):
-                    if isinstance(chunk, str):
-                        yield self._sse("token", chunk)
-                    elif isinstance(chunk, dict):
-                        reply = chunk
-                        if reply.get("analysis") == "Model call failed.":
-                            self._trace(
-                                sid, user_input, intent, "two_pass",
-                                started, error=reply.get("answer", "Request failed"),
-                            )
-                            yield self._sse("error", reply.get("answer", "Request failed"))
-                            return
-
-                yield self._sse("text", reply.get("answer", ""))
-
-                # TTS pre-roll tag — music is already playing, speech is non-blocking
-                speech_sse = await self._maybe_yield_speech(
-                    reply.get("answer", ""), intent.value, is_music_play=True,
-                )
-                if speech_sse:
-                    yield speech_sse
-
-                final_reply = {
-                    **reply,
-                    "music": song_data,
-                    "provider": reply.get("provider", ""),
-                    "model": reply.get("model", ""),
-                }
-                ctx.short_term_memory.add_turn(
-                    user_input, reply.get("answer", ""),
-                    intent=str(intent), played_song=song_data,
-                )
-                asyncio.ensure_future(
-                    self.episodic_memory.store_snapshot(
-                        user_input, reply.get("answer", ""),
-                        played_song=song_data, session_id=sid,
-                    )
-                )
-                self._maybe_reflect(sid, ctx)
-                self._trace(sid, user_input, intent, "two_pass", started, final_reply)
-                yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
+                async for sse in self._stream_resolved_song(
+                    sid, ctx, user_input, intent, metadata, song_data,
+                    started, path="two_pass",
+                ):
+                    yield sse
                 return
 
             # Phase 1 failed — 不直接道歉：降级到带工具的单遍容错链
@@ -487,6 +625,22 @@ class AssistantService:
             retry_actions = self._parse_actions_from_reply(retry_reply)
             results = await self.tool_executor.execute_actions(retry_actions)
             final_reply = await self._merge_tool_results(retry_reply, results)
+
+        # 口味硬约束（v0.7 P0-2）：disliked 命中 → 带反馈重试换艺人；
+        # 重试仍命中/失败 → 丢弃 music（不播放已拉黑艺人，保留文案）
+        disliked = self._disliked_artists(ctx)
+        blocked = self._matched_disliked(final_reply.get("music"), disliked)
+        if blocked:
+            logger.info("Disliked artist blocked: %s", blocked)
+            retried = await self._retry_for_disliked(
+                sid, user_input, intent, metadata, assembler, tools, blocked,
+            )
+            if retried is not None and not self._matched_disliked(
+                retried.get("music"), disliked,
+            ):
+                final_reply = retried
+            else:
+                final_reply.pop("music", None)
 
         music = final_reply.get("music")
         if isinstance(music, dict) and music.get("song_id"):

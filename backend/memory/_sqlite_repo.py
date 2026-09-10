@@ -22,6 +22,12 @@ class SqliteRepository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
 
+    def _connect(self) -> sqlite3.Connection:
+        """打开连接（row_factory=Row —— 快照映射按列名读取，与 schema 顺序无关）。"""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
     # ── 写入 ──────────────────────────────────────────────────────────
 
     def insert_snapshot(
@@ -40,7 +46,7 @@ class SqliteRepository:
         song_id: str | None = None,
     ) -> int:
         """同步 SQLite 插入，返回自增 ID。"""
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO episodes
                    (timestamp, user_input, assistant_reply, played_song_name, played_song_artist,
@@ -64,7 +70,7 @@ class SqliteRepository:
     ) -> list[EpisodicSnapshot]:
         """获取最近 N 条记录（SQLite 查询，简单可靠）。"""
         def _query() -> list[EpisodicSnapshot]:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 if session_id:
                     rows = conn.execute(
                         "SELECT * FROM episodes WHERE session_id = ? "
@@ -79,6 +85,23 @@ class SqliteRepository:
                 return [_row_to_snapshot(row) for row in rows]
         return await asyncio.to_thread(_query)
 
+    async def query_recent_played(
+        self, session_id: str, limit: int = 5,
+    ) -> list[EpisodicSnapshot]:
+        """最近播放记录（有 song_id 的快照，按 id 倒序）—— v0.7 播放历史。"""
+
+        def _query() -> list[EpisodicSnapshot]:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM episodes WHERE session_id = ? "
+                    "AND song_id IS NOT NULL AND song_id != '' "
+                    "ORDER BY id DESC LIMIT ?",
+                    (session_id, limit),
+                ).fetchall()
+                return [_row_to_snapshot(row) for row in rows]
+
+        return await asyncio.to_thread(_query)
+
     async def query_by_keyword(
         self, keyword: str, limit: int = 5, session_id: str | None = None,
     ) -> list[EpisodicSnapshot]:
@@ -86,7 +109,7 @@ class SqliteRepository:
         pattern = f"%{keyword}%"
 
         def _query() -> list[EpisodicSnapshot]:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 if session_id:
                     rows = conn.execute(
                         """SELECT * FROM episodes
@@ -137,7 +160,7 @@ class SqliteRepository:
             params.append(session_id)
 
         def _query() -> list[EpisodicSnapshot]:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     f"SELECT * FROM episodes WHERE {likes} "
                     "ORDER BY timestamp DESC LIMIT ?",
@@ -157,7 +180,7 @@ class SqliteRepository:
         params: tuple = (session_id,) if session_id else ()
 
         def _compute() -> dict[str, Any]:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 genre_rows = conn.execute(
                     f"""SELECT genre_tag, COUNT(*) as cnt FROM episodes
                        {where_prefix}genre_tag IS NOT NULL AND genre_tag != ''
@@ -253,7 +276,7 @@ class SqliteRepository:
         """Efficiently load decay fields for a batch of snapshot IDs."""
         if not snapshot_ids:
             return {}
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             placeholders = ",".join("?" for _ in snapshot_ids)
             rows = conn.execute(
                 f"SELECT id, importance_score, access_count, last_accessed "
@@ -276,7 +299,7 @@ class SqliteRepository:
         now_iso = _utc_now_iso()
 
         def _update() -> None:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 conn.executemany(
                     "UPDATE episodes SET access_count = access_count + 1, "
                     "last_accessed = ? WHERE id = ?",
@@ -290,7 +313,7 @@ class SqliteRepository:
 
     def find_latest_by_song(self, session_id: str, song_id: str) -> int | None:
         """返回该会话中最近一次播放该歌曲的快照 ID，未匹配返回 None。"""
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT id FROM episodes WHERE session_id = ? AND song_id = ? "
                 "ORDER BY id DESC LIMIT 1",
@@ -309,7 +332,7 @@ class SqliteRepository:
         now_iso = _utc_now_iso()
 
         def _update() -> None:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 if event == "song_finished":
                     conn.execute(
                         "UPDATE episodes SET played_to_completion = 1, "
@@ -354,7 +377,7 @@ class SqliteRepository:
         """返回快照的歌曲信息（dislike → 画像写入需要艺人名）。"""
 
         def _query() -> dict[str, Any] | None:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT song_id, played_song_name, played_song_artist "
                     "FROM episodes WHERE id = ?",
@@ -376,7 +399,7 @@ class SqliteRepository:
         params: tuple = (session_id,) if session_id else ()
 
         def _compute() -> dict[str, Any]:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 play_total = conn.execute(
                     f"SELECT COALESCE(SUM(play_count), 0) FROM episodes "
                     f"{where_prefix}play_count > 0",
@@ -427,7 +450,7 @@ class SqliteRepository:
         """持久化一条会话摘要，返回自增 ID。"""
 
         def _insert() -> int:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 cursor = conn.execute(
                     """INSERT INTO session_summaries
                        (session_id, summary_text, topics, song_signals, turn_count, created_at)
@@ -450,7 +473,7 @@ class SqliteRepository:
         """返回该会话最近 N 条摘要（新→旧）。"""
 
         def _query() -> list[dict[str, Any]]:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT summary_text, topics, song_signals, turn_count, created_at "
                     "FROM session_summaries WHERE session_id = ? "
@@ -484,7 +507,7 @@ class SqliteRepository:
         """该会话已有摘要数（用于反射触发节流）。"""
 
         def _count() -> int:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM session_summaries WHERE session_id = ?",
                     (session_id,),
@@ -540,7 +563,7 @@ class SqliteRepository:
         params.append(limit)
 
         def _query() -> list[EpisodicSnapshot]:
-            with sqlite3.connect(str(self.db_path)) as conn:
+            with self._connect() as conn:
                 rows = conn.execute(
                     f"SELECT * FROM episodes WHERE {where} ORDER BY timestamp DESC LIMIT ?",
                     tuple(params),

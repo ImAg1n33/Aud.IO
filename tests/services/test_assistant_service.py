@@ -19,6 +19,9 @@ class StubMemoryManager:
     def get_preference_summary(self) -> str:
         return "Preferred genres: lofi."
 
+    def get_artist_constraints(self) -> dict:
+        return {"liked": ["Artist A"], "disliked": list(getattr(self, "disliked", []))}
+
     async def async_update_profile(self, user_input: str, assistant_reply: str, summaries=None):
         return {"ok": True, "user_input": user_input, "assistant_reply": assistant_reply}
 
@@ -307,8 +310,8 @@ class TestSessionIsolation:
     def test_session_ttl_eviction(self, service) -> None:
         """Sessions expire after TTL and are evicted from cache."""
         base_count = service.session_manager.active_count  # includes TEST_SID from fixture
-        ctx1 = service.session_manager.get_or_create("s1")
-        ctx2 = service.session_manager.get_or_create("s2")
+        service.session_manager.get_or_create("s1")
+        service.session_manager.get_or_create("s2")
 
         assert service.session_manager.active_count == base_count + 2
 
@@ -901,7 +904,6 @@ class TestPhase1MissFallthrough:
 
 class TestConversationTrace:
     """会话级 trace 日志 —— 交互记录写入 conversations.jsonl。"""
-
     def test_trace_writes_jsonl(self, monkeypatch, tmp_path) -> None:
         import json
         import time
@@ -1048,4 +1050,212 @@ class TestStrictToolEnforcement:
                 events.append(sse)
 
         assert strict_calls == []  # 闲聊不触发强制重试
+        assert any("event: done" in e for e in events)
+
+
+class TestPreviousRequest:
+    """上一首（v0.7 P1-2）—— 从播放历史回放，不经 LLM 选曲。"""
+
+    def test_previous_signal_detection(self) -> None:
+        from backend.services.assistant_service import AssistantService
+
+        assert AssistantService._is_previous_request("上一首") is True
+        assert AssistantService._is_previous_request("前一首") is True
+        assert AssistantService._is_previous_request("previous") is True
+        assert AssistantService._is_previous_request("换一首") is False
+        assert AssistantService._is_previous_request("来一首周杰伦") is False
+
+    @pytest.mark.asyncio
+    async def test_replays_previous_from_history(self, service, monkeypatch) -> None:
+        from backend.agent.intent_classifier import Intent, IntentClassifier
+        from backend.memory.models import EpisodicSnapshot
+
+        async def fake_classify(self, user_input: str):
+            return Intent.MUSIC_PLAY
+
+        monkeypatch.setattr(IntentClassifier, "classify_async", fake_classify)
+
+        def snap(i, song_id, name, artist):
+            return EpisodicSnapshot(
+                id=i, timestamp="2026-09-05T00:00:00Z", user_input="x",
+                assistant_reply="", played_song_name=name,
+                played_song_artist=artist, mood_tag=None, weather_tag=None,
+                time_of_day="night", genre_tag=None, song_id=song_id,
+            )
+
+        async def fake_history(session_id, limit=5):
+            # 倒序：当前曲 id=2，上一首 id=1
+            return [snap(2, "2", "B", "ArtistB"), snap(1, "1", "A", "ArtistA")]
+
+        monkeypatch.setattr(service.episodic_memory, "query_recent_played", fake_history)
+
+        async def fake_mp3(song_id, level="standard"):
+            return f"http://x/{song_id}.mp3"
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.get_song_mp3_url", fake_mp3,
+        )
+
+        async def fake_stream(system_prompt, user_prompt, **kw):
+            yield {"analysis": "", "answer": "回到上一首，ArtistA 的 A。",
+                   "actions": [], "play_keyword": "", "provider": "t", "model": "m"}
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "上一首", {"Currently Playing ID": "2"}, session_id="prev-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        music_events = [e for e in events if "event: music" in e]
+        assert len(music_events) == 1
+        assert '"song_id": "1"' in music_events[0]
+        done = [e for e in events if "event: done" in e][0]
+        assert "ArtistA" in done
+
+    @pytest.mark.asyncio
+    async def test_no_history_falls_through(self, service, monkeypatch) -> None:
+        """无历史 → 走正常流程（单遍容错链），不报错。"""
+        from backend.agent.intent_classifier import Intent, IntentClassifier
+
+        async def fake_classify(self, user_input: str):
+            return Intent.MUSIC_PLAY
+
+        monkeypatch.setattr(IntentClassifier, "classify_async", fake_classify)
+
+        async def fake_history(session_id, limit=5):
+            return []
+
+        monkeypatch.setattr(service.episodic_memory, "query_recent_played", fake_history)
+
+        async def fake_stream(system_prompt, user_prompt, **kw):
+            yield {"analysis": "", "answer": "好的", "actions": [],
+                   "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_call_llm(system_prompt, user_prompt, model=None, **kw):
+            return {"analysis": "", "answer": "", "actions": [],
+                    "play_keyword": "", "provider": "t", "model": "m"}
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+        monkeypatch.setattr("backend.services.assistant_service.call_llm", fake_call_llm)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "上一首", {}, session_id="prev-no-history",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        assert any("event: done" in e for e in events)
+
+
+class TestDislikedEnforcement:
+    """口味硬约束（v0.7 P0-2）—— disliked 命中 → 重试换艺人，仍命中则不播。"""
+
+    @pytest.mark.asyncio
+    async def test_disliked_retried_with_different_artist(self, service, monkeypatch) -> None:
+        from backend.agent.intent_classifier import Intent, IntentClassifier
+
+        TestStrictToolEnforcement._ensure_music_tools()
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
+
+        async def fake_classify(self, user_input: str):
+            return Intent.MUSIC_RECOMMEND
+
+        monkeypatch.setattr(IntentClassifier, "classify_async", fake_classify)
+
+        # 会话画像：不喜欢的艺人
+        ctx = service.session_manager.get_or_create("disliked-test")
+        ctx.memory_manager = StubMemoryManager()
+        ctx.memory_manager.disliked = ["RyaVocal"]
+
+        search_calls = {"n": 0}
+
+        async def fake_search(keyword: str):
+            search_calls["n"] += 1
+            if search_calls["n"] == 1:
+                return {"id": "1", "name": "晴天", "artist": "RyaVocal"}
+            return {"id": "2", "name": "爱爱爱", "artist": "方大同"}
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return f"http://x/{song_id}.mp3"
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            # 首搜命中 disliked 艺人
+            yield {"analysis": "", "answer": "",
+                   "actions": [{"tool": "search_music", "keyword": "周杰伦 晴天"}],
+                   "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model=None, **kw):
+            # disliked 重试：换艺人
+            assert "RyaVocal" in user_prompt
+            return {"analysis": "", "answer": "",
+                    "actions": [{"tool": "search_music", "keyword": "方大同 爱爱爱"}],
+                    "play_keyword": "", "provider": "t", "model": "m"}
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+        monkeypatch.setattr("backend.services.assistant_service.call_llm", fake_call_llm)
+        monkeypatch.setattr("backend.tools.music_tool.search_first_song", fake_search)
+        monkeypatch.setattr("backend.tools.netease_api.get_song_mp3_url", fake_mp3)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "推荐点歌", {}, session_id="disliked-test",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        music_events = [e for e in events if "event: music" in e]
+        assert len(music_events) == 1
+        assert "方大同" in music_events[0]
+        assert "RyaVocal" not in music_events[0]
+
+    @pytest.mark.asyncio
+    async def test_disliked_twice_drops_music(self, service, monkeypatch) -> None:
+        from backend.agent.intent_classifier import Intent, IntentClassifier
+
+        TestStrictToolEnforcement._ensure_music_tools()
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
+
+        async def fake_classify(self, user_input: str):
+            return Intent.MUSIC_RECOMMEND
+
+        monkeypatch.setattr(IntentClassifier, "classify_async", fake_classify)
+
+        ctx = service.session_manager.get_or_create("disliked-twice")
+        ctx.memory_manager = StubMemoryManager()
+        ctx.memory_manager.disliked = ["RyaVocal"]
+
+        async def fake_search(keyword: str):
+            return {"id": "1", "name": "晴天", "artist": "RyaVocal"}
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return "http://x/1.mp3"
+
+        async def fake_stream(system_prompt: str, user_prompt: str, **kw):
+            yield {"analysis": "", "answer": "",
+                   "actions": [{"tool": "search_music", "keyword": "周杰伦 晴天"}],
+                   "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_call_llm(system_prompt: str, user_prompt: str, model=None, **kw):
+            # 重试仍推 disliked 艺人
+            return {"analysis": "", "answer": "",
+                    "actions": [{"tool": "search_music", "keyword": "周杰伦 晴天"}],
+                    "play_keyword": "", "provider": "t", "model": "m"}
+
+        monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
+        monkeypatch.setattr("backend.services.assistant_service.call_llm", fake_call_llm)
+        monkeypatch.setattr("backend.tools.music_tool.search_first_song", fake_search)
+        monkeypatch.setattr("backend.tools.netease_api.get_song_mp3_url", fake_mp3)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "推荐点歌", {}, session_id="disliked-twice",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        assert not any("event: music" in e for e in events)
         assert any("event: done" in e for e in events)

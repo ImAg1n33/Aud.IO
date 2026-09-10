@@ -9,7 +9,9 @@
 
 import asyncio
 import logging
+import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, ClassVar
 
 import httpx
@@ -203,13 +205,21 @@ class FastEmbedProvider(EmbeddingProvider):
     def __init__(self, model: str | None = None) -> None:
         self.model = model or settings.embedding_local_model.strip() or "BAAI/bge-small-zh-v1.5"
         self.dimension: int = self._KNOWN_DIMS.get(self.model, 0)
+        # 显式持久化缓存目录（v0.7 修复：fastembed 默认缓存 /tmp/fastembed_cache
+        # 不在挂载卷内，容器重建即丢 → 断网时嵌入停摆）。
+        # 默认 ~/.cache/fastembed（容器内 HOME=/app → /app/.cache/fastembed → 宿主卷）
+        cache_override = os.getenv("EMBEDDING_CACHE_DIR", "").strip()
+        self.cache_dir = cache_override or str(Path.home() / ".cache" / "fastembed")
         self._model_obj: Any | None = None
 
     def _lazy_model(self) -> Any:
         if self._model_obj is None:
             from fastembed import TextEmbedding
 
-            self._model_obj = TextEmbedding(model_name=self.model)
+            Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
+            self._model_obj = TextEmbedding(
+                model_name=self.model, cache_dir=self.cache_dir,
+            )
             # 未知维度模型 → 实测一次确定维度
             if self.dimension == 0:
                 probe = self._model_obj.embed(["维度探测"])

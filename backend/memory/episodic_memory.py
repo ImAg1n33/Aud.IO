@@ -449,6 +449,12 @@ class EpisodicMemory:
     ) -> list[EpisodicSnapshot]:
         return await self._sqlite.query_recent(limit=limit, session_id=session_id)
 
+    async def query_recent_played(
+        self, session_id: str, limit: int = 5,
+    ) -> list[EpisodicSnapshot]:
+        """最近播放（有 song_id 的快照，倒序）—— "上一首"回放历史（v0.7）。"""
+        return await self._sqlite.query_recent_played(session_id, limit=limit)
+
     async def query_by_keyword(self, keyword: str, limit: int = 5, session_id: str | None = None) -> list[EpisodicSnapshot]:
         """文本关键词 LIKE 搜索 —— 在 user_input 和 assistant_reply 中匹配。
 

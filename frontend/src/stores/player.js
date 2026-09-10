@@ -161,18 +161,6 @@ export const usePlayerStore = defineStore('player', {
       }
     },
 
-    /** PREV：重播当前曲（无历史队列，语义为重播） */
-    async prevTrack() {
-      if (!audioElement || !this.currentTrack) return
-      this.attachAudio(audioElement)
-      await this._ensureAudioRunning()
-      audioElement.currentTime = 0
-      audioElement.play()
-      this.isPlaying = true
-      playbackStartAt = Date.now()
-      finishedReported = false
-    },
-
     /** 音量（0-1，本地记忆） */
     setVolume(v) {
       const clamped = Math.min(1, Math.max(0, v))

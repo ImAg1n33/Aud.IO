@@ -95,12 +95,17 @@ class CurrentlyPlayingProvider(ContextProvider):
 
     name = "currently_playing"
     KEY = "Currently Playing"
+    KEY_ID = "Currently Playing ID"
 
     async def get_context(self, intent: Intent, user_input: str, metadata: dict[str, Any]) -> str | None:
         currently_playing = metadata.get(self.KEY)
         if not currently_playing or currently_playing == "None":
             return None
-        return f"[Currently Playing]\n{currently_playing}"
+        block = f"[Currently Playing]\n{currently_playing}"
+        cp_id = metadata.get(self.KEY_ID)
+        if isinstance(cp_id, str) and cp_id.strip():
+            block += f"\n(song_id: {cp_id.strip()})"
+        return block
 
 
 # ============================================================

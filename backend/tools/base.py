@@ -33,6 +33,10 @@ class MusicCopyrightError(ToolExecutionError):
     """Song is blocked by copyright — retry signal."""
 
 
+class MusicUnavailableError(ToolExecutionError):
+    """Only covers/low-quality versions available — retry signal (换曲)."""
+
+
 class WeatherError(ToolExecutionError):
     """Weather API failure."""
 

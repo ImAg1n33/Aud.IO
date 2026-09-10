@@ -156,6 +156,7 @@ export const useChatStore = defineStore('chat', {
       const currentlyPlaying = player.currentTrack
         ? `${player.currentTrack.artist} - ${player.currentTrack.name}`
         : 'None'
+      const currentlyPlayingId = player.currentTrack?.song_id || ''
 
       try {
         const response = await fetch('/api/v1/agent/respond/stream', {
@@ -163,7 +164,10 @@ export const useChatStore = defineStore('chat', {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             user_input: text,
-            context: { 'Currently Playing': currentlyPlaying },
+            context: {
+              'Currently Playing': currentlyPlaying,
+              'Currently Playing ID': currentlyPlayingId,
+            },
             session_id: this.sessionId,
           }),
         })

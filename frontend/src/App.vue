@@ -2,13 +2,19 @@
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { usePlayerStore } from './stores/player'
 import { useChatStore } from './stores/chat'
+import { usePlaylistStore } from './stores/playlist'
+import { isListMode } from './stores/queue.js'
 import ChatPanel from './components/ChatPanel.vue'
 import PlayerPanel from './components/PlayerPanel.vue'
 import InputBar from './components/InputBar.vue'
+import HistoryPanel from './components/HistoryPanel.vue'
 import DebugPanel from './components/DebugPanel.vue'
 
 // ── Session identity ──
 const chat = useChatStore()
+const player = usePlayerStore()
+const playlist = usePlaylistStore()
+
 let sessionId = localStorage.getItem('aud_io_session')
 if (!sessionId) {
   sessionId = crypto.randomUUID()
@@ -16,38 +22,56 @@ if (!sessionId) {
 }
 chat.setSession(sessionId)
 
-// ── Theme ──
+// ── Theme（防闪由 index.html 内联脚本负责，这里只做同步与切换） ──
 const theme = ref('dark')
-const toggleTheme = () => {
-  theme.value = theme.value === 'dark' ? 'light' : 'dark'
-  document.documentElement.setAttribute('data-theme', theme.value)
-  localStorage.setItem('theme', theme.value)
+
+function applyTheme(next) {
+  theme.value = next
+  document.documentElement.setAttribute('data-theme', next)
+  localStorage.setItem('theme', next)
+}
+
+function toggleTheme() {
+  applyTheme(theme.value === 'dark' ? 'light' : 'dark')
 }
 
 onMounted(() => {
   const saved = localStorage.getItem('theme')
-  if (saved) {
-    theme.value = saved
-    document.documentElement.setAttribute('data-theme', saved)
-  }
+  if (saved === 'light' || saved === 'dark') theme.value = saved
+  document.documentElement.setAttribute('data-theme', theme.value)
 })
 
-// ── Debug toggle ──
+// ── Panels ──
 const showDebug = ref(false)
+const showHistory = ref(false)
 
 // ── Audio element ref (injected into player store) ──
 const audioRef = ref(null)
 onMounted(() => {
   if (audioRef.value) {
-    const player = usePlayerStore()
     player.attachAudio(audioRef.value)
+    playlist.syncSession(sessionId)
   }
 })
+
+/** 歌曲自然播完 → 模式编排（RFC-020 §2.5） */
+function onTrackEnded() {
+  const endedSongId = player.currentTrack?.song_id || ''
+  player.onEnded()
+  if (player.playMode === 'dj') {
+    chat.autoContinue()
+  } else if (isListMode(player.playMode)) {
+    const nextId = playlist.nextSongId(player.playMode, endedSongId)
+    if (nextId) chat.playLocalSong(nextId, { fromEnded: true })
+  }
+  // loop：audio.loop 处理，不会触发 ended
+}
 
 // ── 键盘快捷键（仅桌面） ──
 function onKeydown(e) {
   const target = e.target
   const isTyping = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')
+  const isButton = target?.tagName === 'BUTTON'
 
   // Ctrl+K 或 '/' 聚焦输入框
   if ((e.ctrlKey && e.key.toLowerCase() === 'k') || (e.key === '/' && !isTyping)) {
@@ -57,10 +81,16 @@ function onKeydown(e) {
     return
   }
 
-  // 空格播放/暂停（输入中不响应）
-  if (e.code === 'Space' && !isTyping && target?.tagName !== 'BUTTON') {
+  // 空格播放/暂停（输入中/按钮聚焦时不响应）
+  if (e.code === 'Space' && !isTyping && !isButton) {
     e.preventDefault()
-    usePlayerStore().togglePlay()
+    player.togglePlay()
+  }
+
+  // H 打开/关闭历史（输入中不响应）
+  if (e.key.toLowerCase() === 'h' && !isTyping && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault()
+    showHistory.value = !showHistory.value
   }
 }
 
@@ -71,8 +101,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 <template>
   <div class="app">
     <nav class="toolbar">
-      <span class="brand">AUD.IO</span>
+      <span class="brand">AUD<em>.</em>IO</span>
       <div class="toolbar-actions">
+        <button
+          class="toolbar-btn"
+          :class="{ active: showHistory }"
+          @click="showHistory = !showHistory"
+        >
+          [HISTORY]
+        </button>
         <button class="toolbar-btn" @click="showDebug = !showDebug">
           {{ showDebug ? '[HIDE RAW]' : '[RAW]' }}
         </button>
@@ -82,15 +119,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       </div>
     </nav>
 
-    <ChatPanel />
     <PlayerPanel />
+    <ChatPanel />
     <InputBar />
 
+    <HistoryPanel :visible="showHistory" @close="showHistory = false" />
     <DebugPanel :visible="showDebug" />
 
     <audio
       ref="audioRef"
-      @ended="usePlayerStore().onEnded()"
+      @ended="onTrackEnded"
       crossorigin="anonymous"
     ></audio>
   </div>

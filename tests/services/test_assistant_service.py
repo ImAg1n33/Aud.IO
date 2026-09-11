@@ -1259,3 +1259,166 @@ class TestDislikedEnforcement:
 
         assert not any("event: music" in e for e in events)
         assert any("event: done" in e for e in events)
+
+
+class TestAutoContinue:
+    """自动续播（RFC-020 契约 D）—— 按品味选下一首，排除最近播放。"""
+
+    def test_auto_continue_signal_detection(self) -> None:
+        assert AssistantService._is_auto_continue({"Auto Continue": "true"}) is True
+        assert AssistantService._is_auto_continue({"Auto Continue": "TRUE"}) is True
+        assert AssistantService._is_auto_continue({"Auto Continue": "1"}) is False
+        assert AssistantService._is_auto_continue({}) is False
+        assert AssistantService._is_auto_continue(None) is False
+
+    @pytest.mark.asyncio
+    async def test_simi_pick_excludes_recent(self, service, monkeypatch) -> None:
+        """相似优先：排除最近播放后选择第一个可播候选。"""
+        from backend.services import assistant_service as svc_mod
+
+        ctx = service.session_manager.get_or_create("auto-simi")
+        ctx.memory_manager = StubMemoryManager()
+
+        recent = [
+            {"song_id": "cur", "name": "Current", "artist": "A",
+             "cover_url": "", "album": "", "duration_ms": None,
+             "requested_keyword": "", "played_at": "", "session_id": "auto-simi"},
+        ]
+
+        async def fake_list(session_id=None, limit=50):
+            return recent
+
+        monkeypatch.setattr(service.play_history, "list_async", fake_list)
+
+        async def fake_simi(song_id, limit=10):
+            assert song_id == "cur"
+            return [
+                {"id": "cur", "name": "Current", "artist": "A",
+                 "cover_url": "", "album": "", "duration_ms": None},
+                {"id": "next", "name": "Next Song", "artist": "B",
+                 "cover_url": "http://c/1.jpg", "album": "Alb",
+                 "duration_ms": 200000},
+            ]
+
+        monkeypatch.setattr(svc_mod, "find_similar_songs", fake_simi)
+
+        async def fake_mp3(song_id, level="standard"):
+            return f"http://x/{song_id}.mp3"
+
+        monkeypatch.setattr(svc_mod, "get_song_mp3_url", fake_mp3)
+
+        async def fake_stream(system_prompt, user_prompt, **kw):
+            yield {"analysis": "", "answer": "电台继续。", "actions": [],
+                   "play_keyword": "", "provider": "t", "model": "m"}
+
+        monkeypatch.setattr(svc_mod, "stream_llm", fake_stream)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "", {"Auto Continue": "true"}, session_id="auto-simi",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        music_events = [e for e in events if "event: music" in e]
+        assert len(music_events) == 1
+        assert '"song_id": "next"' in music_events[0]
+        assert '"cover_url": "http://c/1.jpg"' in music_events[0]
+        assert any("event: done" in e for e in events)
+
+    @pytest.mark.asyncio
+    async def test_llm_fallback_picks_by_taste(self, service, monkeypatch) -> None:
+        """相似为空 → LLM 带工具按画像挑歌。"""
+        from backend.services import assistant_service as svc_mod
+
+        TestBuildToolSchemas._ensure_music_tools_registered()
+        monkeypatch.setattr(settings, "netease_cookie", "test-cookie")
+
+        ctx = service.session_manager.get_or_create("auto-llm")
+        ctx.memory_manager = StubMemoryManager()
+
+        recent = [
+            {"song_id": "cur", "name": "Current", "artist": "A",
+             "cover_url": "", "album": "", "duration_ms": None,
+             "requested_keyword": "", "played_at": "", "session_id": "auto-llm"},
+        ]
+
+        async def fake_list(session_id=None, limit=50):
+            return recent
+
+        monkeypatch.setattr(service.play_history, "list_async", fake_list)
+
+        async def fake_simi(song_id, limit=10):
+            return []
+
+        monkeypatch.setattr(svc_mod, "find_similar_songs", fake_simi)
+
+        async def fake_call_llm(system_prompt, user_prompt, model=None, **kw):
+            assert "自动续播" in user_prompt
+            return {"analysis": "", "answer": "",
+                    "actions": [{"tool": "search_music", "keyword": "B New"}],
+                    "play_keyword": "", "provider": "t", "model": "m"}
+
+        monkeypatch.setattr(svc_mod, "call_llm", fake_call_llm)
+
+        async def fake_search(keyword):
+            return {"id": "new", "name": "New", "artist": "B",
+                    "cover_url": "", "album": "", "duration_ms": 111}
+
+        monkeypatch.setattr("backend.tools.music_tool.search_first_song", fake_search)
+
+        async def fake_mp3(song_id, level="standard"):
+            return f"http://x/{song_id}.mp3"
+
+        monkeypatch.setattr("backend.tools.netease_api.get_song_mp3_url", fake_mp3)
+        monkeypatch.setattr(svc_mod, "get_song_mp3_url", fake_mp3)
+
+        async def fake_stream(system_prompt, user_prompt, **kw):
+            yield {"analysis": "", "answer": "接着听。", "actions": [],
+                   "play_keyword": "", "provider": "t", "model": "m"}
+
+        monkeypatch.setattr(svc_mod, "stream_llm", fake_stream)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "", {"Auto Continue": "true"}, session_id="auto-llm",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        music_events = [e for e in events if "event: music" in e]
+        assert len(music_events) == 1
+        assert '"song_id": "new"' in music_events[0]
+
+    @pytest.mark.asyncio
+    async def test_no_candidate_emits_error(self, service, monkeypatch) -> None:
+        from backend.services import assistant_service as svc_mod
+
+        ctx = service.session_manager.get_or_create("auto-none")
+        ctx.memory_manager = StubMemoryManager()
+
+        async def fake_list(session_id=None, limit=50):
+            return []
+
+        monkeypatch.setattr(service.play_history, "list_async", fake_list)
+
+        async def fake_simi(song_id, limit=10):
+            return []
+
+        monkeypatch.setattr(svc_mod, "find_similar_songs", fake_simi)
+
+        async def fake_call_llm(system_prompt, user_prompt, model=None, **kw):
+            return {"analysis": "", "answer": "", "actions": [],
+                    "play_keyword": "", "provider": "t", "model": "m"}
+
+        monkeypatch.setattr(svc_mod, "call_llm", fake_call_llm)
+
+        events = []
+        async for sse in service.generate_reply_stream(
+            "", {"Auto Continue": "true"}, session_id="auto-none",
+        ):
+            if sse.startswith("event: "):
+                events.append(sse)
+
+        assert any("event: error" in e for e in events)
+        assert not any("event: music" in e for e in events)

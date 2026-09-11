@@ -11,6 +11,7 @@ IntentClassifier ──→ Hard Signal (来一首/播放) → MUSIC_PLAY
   │                  Keyword fallback (deterministic)
   │
   ├── PREV_SIGNALS (上一首) ──→ 播放历史回放 (prev_history，不经 LLM 选曲)
+  ├── AUTO CONTINUE ──→ DJ 电台续播 (auto_dj：相似歌曲优先 → 品味兜底，排除最近 10 首)
   │
   ▼
 ContextAssembler — 7 pluggable Providers → user-prompt string
@@ -36,6 +37,13 @@ LLM Call ──→ System Prompt (role="system", from prompts.py Layer 0-3)
 `NoAcceptableSongError` → `MusicUnavailableError`（可重试换曲）。**Disliked enforcement**:
 播放前校验画像 `disliked` 艺人 → 带反馈重试换艺人，仍命中则不播放。
 
+**Play history** (v0.8): 每次 `music` 事件发出即写入 `play_history`（会话内去重；
+会话 cap 50 / 全局 cap 100）。它是列表模式、`/history` `/replay` API、自动续播
+去重、"上一首"回退的共同数据源；只存元数据（mp3 URL 会过期，播放前重解析）。
+
+**Song metadata** (v0.8): `music` 载荷携带 `cover_url` / `album` / `duration_ms`
+（cloudsearch `al.picUrl` / `dt` 透传），前端封面与时长即刻可用。
+
 ## Component Map
 
 ### Agent Layer (`backend/agent/`)
@@ -58,7 +66,8 @@ Repository pattern (RFC-008) — Facade + repositories + helpers:
 | `episodic_memory.py` | **Facade** — orchestrates write/read/hybrid-retrieval/decay rerank/fallback/feedback/reflection |
 | `_sqlite_repo.py` | **SqliteRepository** — SQLite CRUD, feedback fields, summaries, play history, hybrid keyword search |
 | `_chroma_repo.py` | **ChromaRepository** — pure vector store operations (dim metadata) |
-| `_migration.py` | **MigrationManager** — versioned, idempotent (v1-v6, self-healing) |
+| `_migration.py` | **MigrationManager** — versioned, idempotent (v1-v7, self-healing) |
+| `play_history.py` | **PlayHistoryRepository** — session playlist cache / cross-session recent (dedup, 50/100 caps) |
 | `models.py` | EpisodicSnapshot + `_row_to_snapshot` (**column-name based**, order-independent), time utils |
 | `mood_detector.py` | Chinese/English keyword → 10 mood tags |
 | `decay.py` | Pure function: Ebbinghaus-weighted retrieval score |
@@ -97,7 +106,7 @@ Repository pattern (RFC-008) — Facade + repositories + helpers:
 
 ```
 1. Intent = MUSIC_PLAY
-2. SSE "searching" status → frontend shows "Searching..."
+2. SSE "searching" status → frontend shows a structured scanning state
 3. Phase 1: call_llm(PHASE1_DECISION_SYSTEM) → extract play_keyword
 4. Scored search (cloudsearch candidates → cover/original/artist/popularity scoring)
    → get_song_mp3_url(id); disliked artist check
@@ -124,10 +133,33 @@ Repository pattern (RFC-008) — Facade + repositories + helpers:
 ### Previous-Song Replay (上一首, v0.7)
 
 ```
-1. PREV_SIGNALS matched → query_recent_played(session_id)
+1. PREV_SIGNALS matched → play_history lookup (episodes fallback for pre-v0.8 data)
 2. Pick most recent entry whose song_id != current (Currently Playing ID)
 3. Resolve mp3 → SSE "music" → Phase 2 DJ line → done (trace path: prev_history)
    无历史 → 回落正常流程
+```
+
+### Auto-Continue / DJ Radio (v0.8)
+
+```
+1. Song naturally ends in DJ mode → frontend sends context {"Auto Continue": "true"}
+   (no user bubble; DJ message is marked AUTO)
+2. Guard: skipped while a user request is in flight (user wins)
+3. Pick: find_similar_songs(last played) → first candidate not in session-recent-10
+   and not disliked; else LLM with tools + taste profile + exclusion hint
+4. Reuse Phase 2: SSE "music" → DJ line over intro → done (trace path: auto_dj)
+   No candidate → SSE "error"; frontend retries (4s, max 3) then circuit-breaks
+```
+
+### Local Playback (list modes, v0.8)
+
+```
+Frontend list modes (list-loop / list-shuffle) keep a local copy of the session
+playlist (GET /history sync + music events). NEXT / natural end → POST /replay
+(re-resolves a fresh mp3_url) → playTrack — no LLM. Cache too small → fall back
+to the agent ("换一首"). "上一首" stays session-history replay across all modes.
+Mode semantics (DJ / repeat-one / list-loop / shuffle) live in the frontend queue
+module; the backend only knows MUSIC_PLAY + auto-continue + prev signals.
 ```
 
 ## Prompt Architecture (RFC-007)
@@ -169,6 +201,7 @@ v3: ALTER TABLE ADD COLUMN song_id + feedback fields (played_to_completion, list
 v4: Self-healing repair — ensures all expected columns exist (historic DBs with incomplete migration state)
 v5: session_summaries table (Reflection cross-session memory)
 v6: ALTER TABLE ADD COLUMN dislike_count (explicit dislike / rejection learning)
+v7: play_history table (song metadata + per-session dedup, session/global caps)
 ```
 
 Migrations run on `EpisodicMemory.__init__()`, are idempotent, and execute in version order.

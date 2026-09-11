@@ -156,6 +156,30 @@ def _extract_artist_name(song: dict[str, Any]) -> str:
     return ", ".join(names)
 
 
+def _extract_cover_album(song: dict[str, Any]) -> tuple[str, str]:
+    """封面 URL + 专辑名 —— 兼容 cloudsearch (al) 与 search (album) 两种形状。"""
+    node = song.get("al")
+    if not isinstance(node, dict):
+        node = song.get("album")
+    if not isinstance(node, dict):
+        return "", ""
+    cover = node.get("picUrl") or node.get("blurPicUrl") or ""
+    name = node.get("name") or ""
+    return (
+        str(cover) if isinstance(cover, str) else "",
+        str(name) if isinstance(name, str) else "",
+    )
+
+
+def _extract_duration_ms(song: dict[str, Any]) -> int | None:
+    """时长（毫秒）—— cloudsearch/search 均提供 dt。"""
+    for key in ("dt", "duration"):
+        value = song.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    return None
+
+
 # ================================================================
 # 搜索质量评分（v0.7 挑歌精度）
 # ================================================================
@@ -291,10 +315,14 @@ async def search_first_song(keyword: str) -> dict[str, Any]:
             "candidates are covers / low-quality versions."
         )
 
+    cover_url, album = _extract_cover_album(best)
     return {
         "id": str(best.get("id")),
         "name": str(best.get("name")).strip(),
         "artist": _extract_artist_name(best),
+        "cover_url": cover_url,
+        "album": album,
+        "duration_ms": _extract_duration_ms(best),
     }
 
 
@@ -338,12 +366,16 @@ async def find_similar_songs(song_id: str, limit: int = 10) -> list[dict[str, An
             continue
 
         pop = song.get("popularity")
+        cover_url, album = _extract_cover_album(song)
         result.append(
             {
                 "id": str(raw_id),
                 "name": name.strip(),
                 "artist": _extract_artist_name(song),
                 "popularity": int(pop) if isinstance(pop, (int, float)) else 0,
+                "cover_url": cover_url,
+                "album": album,
+                "duration_ms": _extract_duration_ms(song),
             }
         )
 

@@ -20,7 +20,7 @@ class MigrationManager:
     ChromaDB collection 引用是可选的 —— 仅在需要元数据回填时传入。
     """
 
-    CURRENT_VERSION = 6
+    CURRENT_VERSION = 7
 
     def __init__(
         self,
@@ -36,6 +36,7 @@ class MigrationManager:
             (4, self._migrate_v4_repair_columns),
             (5, self._migrate_v5_session_summaries),
             (6, self._migrate_v6_dislike_count),
+            (7, self._migrate_v7_play_history),
         ]
 
     # ── 初始化 ─────────────────────────────────────────────────────────
@@ -274,4 +275,37 @@ class MigrationManager:
                 )
             except sqlite3.OperationalError:
                 pass
+            conn.commit()
+
+    # ── v7: 播放历史（RFC-020 契约 B） ────────────────────────────────
+
+    def _migrate_v7_play_history(self) -> None:
+        """Create play_history — 会话歌单缓存 + 跨会话最近播放。
+
+        每次 music 事件发出即写入（去重、会话 cap 50 / 全局 cap 100）。
+        只存元数据；mp3_url 会过期，播放前重新解析。
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS play_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    song_id TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    artist TEXT NOT NULL DEFAULT '',
+                    cover_url TEXT NOT NULL DEFAULT '',
+                    album TEXT NOT NULL DEFAULT '',
+                    duration_ms INTEGER,
+                    requested_keyword TEXT NOT NULL DEFAULT '',
+                    played_at TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_play_history_session "
+                "ON play_history(session_id, id DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_play_history_song "
+                "ON play_history(song_id, id DESC)"
+            )
             conn.commit()

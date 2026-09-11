@@ -52,7 +52,7 @@ Non-streaming agent pipeline. Full response returned at once.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `user_input` | string | yes | User's raw message |
-| `context` | object | no | Frontend context (`Currently Playing`, `raw_context`) |
+| `context` | object | no | Frontend context (`Currently Playing`, `Currently Playing ID`, `Auto Continue`) |
 | `session_id` | string | no | UUID session identifier (auto-generated if absent) |
 
 **Response** `200`:
@@ -70,6 +70,9 @@ Non-streaming agent pipeline. Full response returned at once.
       "song_id": "12345",
       "name": "Song Name",
       "artist": "Artist",
+      "cover_url": "http://p2.music.126.net/....jpg",
+      "album": "Album Name",
+      "duration_ms": 213266,
       "mp3_url": "http://..."
     }
   },
@@ -113,11 +116,87 @@ snapshot's `importance_score`. This is how the DJ learns from real listening beh
 
 ---
 
+## GET /v1/agent/history
+
+Play history (RFC-020). Every emitted `music` event is recorded with per-session
+dedup; a session keeps its latest 50 tracks, and the global list keeps the latest 100.
+
+**Query parameters**:
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `scope` | string | `global` | `session` (this session's playlist cache) or `global` (cross-session recent) |
+| `limit` | int | `50` | Max rows returned (capped at 100) |
+| `session_id` | string | — | Required when `scope=session` |
+
+**Response** `200`:
+```json
+{
+  "scope": "session",
+  "songs": [
+    {
+      "song_id": "82453",
+      "name": "爱爱爱",
+      "artist": "方大同",
+      "cover_url": "http://p2.music.126.net/....jpg",
+      "album": "爱爱爱",
+      "duration_ms": 213266,
+      "requested_keyword": "方大同 爱爱爱",
+      "played_at": "2026-09-11T09:00:00Z",
+      "session_id": "...."
+    }
+  ]
+}
+```
+
+**Errors**: `400` missing/illegal `session_id` when `scope=session`.
+
+Notes: rows carry metadata only — `mp3_url` is intentionally never cached
+(NetEase URLs expire); use `/replay` to re-resolve before playback.
+
+---
+
+## POST /v1/agent/replay
+
+Re-resolve a song from play history and return a playable payload (RFC-020).
+Used by the frontend for list-mode local switching and history-panel playback —
+no LLM involved. Replaying also moves the song to the top of the history.
+
+**Body** (JSON):
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `song_id` | string | yes | Song ID (must be present in play history) |
+| `session_id` | string | no | UUID session identifier (falls back to global lookup) |
+
+**Response** `200`:
+```json
+{
+  "song_id": "82453",
+  "name": "爱爱爱",
+  "artist": "方大同",
+  "cover_url": "http://p2.music.126.net/....jpg",
+  "album": "爱爱爱",
+  "duration_ms": 213266,
+  "requested_keyword": "previous",
+  "mp3_url": "http://m8.music.126.net/....mp3"
+}
+```
+
+**Errors**: `400` illegal `session_id` · `404` song not in history ·
+`502` NetEase could not resolve a playable URL (copyright/regional lock).
+
+---
+
 ## POST /v1/agent/respond/stream
 
 Streaming agent pipeline via **Server-Sent Events (SSE)**. Text tokens arrive in real-time for typewriter UI; music data triggers playback.
 
 **Body** — same as `/respond`.
+
+**Auto-Continue (DJ radio mode)**: send `context: {"Auto Continue": "true"}` with an
+empty `user_input` to request the next track for continuous playback. The backend
+picks via similar-song data first (LLM taste-based fallback), excludes the session's
+last 10 tracks, and streams the normal `music` + `token` + `done` sequence
+(trace path `auto_dj`). If nothing is available it emits an `error` event.
 
 **SSE Event Types**:
 
@@ -126,7 +205,7 @@ Streaming agent pipeline via **Server-Sent Events (SSE)**. Text tokens arrive in
 | `status` | `{"phase":"searching"}` | Two-Pass Phase 1 started |
 | `status` | `{"phase":"found","name":"...","artist":"..."}` | Song resolved, about to play |
 | `status` | `{"phase":"not_found"}` | Song not found, DJ breaks the news |
-| `music` | `{"song_id":"...","name":"...","artist":"...","mp3_url":"..."}` | Start playback immediately |
+| `music` | `{"song_id":"...","name":"...","artist":"...","cover_url":"...","album":"...","duration_ms":213266,"mp3_url":"..."}` | Start playback immediately |
 | `speech` | `{"urls":["https://..."], "text":"...", "intent":"chitchat"}` | TTS audio URLs for voice output |
 | `token` | `"char"` | Single displayable character (typewriter feed) |
 | `text` | `"full assembled answer"` | Complete answer text (after streaming) |
@@ -144,7 +223,7 @@ event: status
 data: {"phase":"found","name":"So What","artist":"Miles Davis"}
 
 event: music
-data: {"song_id":"123","name":"So What","artist":"Miles Davis","mp3_url":"http://..."}
+data: {"song_id":"123","name":"So What","artist":"Miles Davis","cover_url":"http://p2.music.126.net/....jpg","album":"Kind of Blue","duration_ms":545000,"mp3_url":"http://..."}
 
 event: token
 data: P

@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { usePlayerStore } from './player.js'
+import { usePlaylistStore } from './playlist.js'
 import { SSEParser } from './sse-parser.js'
 import { enqueueSpeech, stopSpeech } from './speech-queue.js'
 
@@ -11,11 +12,11 @@ let _seq = 0
 const _nextId = () => `m${++_seq}`
 
 export function createUserMessage(text) {
-  return { id: _nextId(), role: 'user', text, song: null, state: 'done', errorText: '' }
+  return { id: _nextId(), role: 'user', text, song: null, state: 'done', errorText: '', status: null, auto: false }
 }
 
-export function createDJMessage() {
-  return { id: _nextId(), role: 'dj', text: '', song: null, state: 'streaming', errorText: '' }
+export function createDJMessage({ auto = false } = {}) {
+  return { id: _nextId(), role: 'dj', text: '', song: null, state: 'streaming', errorText: '', status: null, auto }
 }
 
 /**
@@ -29,7 +30,7 @@ export function applyEvent(messages, event, data) {
 
   switch (event) {
     case 'text':
-      // 完整文案（覆盖 Searching... 占位，清空打字机队列由调用方处理）
+      // 完整文案（覆盖静默预取路径的收集文本）
       if (last.role === 'dj') {
         last.text = data
         last.state = last.state === 'error' ? last.state : 'streaming'
@@ -47,14 +48,11 @@ export function applyEvent(messages, event, data) {
     }
 
     case 'status': {
+      // 结构化状态（searching / found / not_found）—— UI 独立表达，不再塞进文本
       if (last.role !== 'dj') return msgs
       try {
         const status = JSON.parse(data)
-        if (status.phase === 'searching') {
-          last.text = 'Searching...'
-        } else if (status.phase === 'found' || status.phase === 'not_found') {
-          if (last.text === 'Searching...') last.text = ''
-        }
+        last.status = status.phase || null
       } catch (e) {
         /* 忽略畸形 status */
       }
@@ -62,13 +60,17 @@ export function applyEvent(messages, event, data) {
     }
 
     case 'done':
-      if (last.role === 'dj') last.state = 'done'
+      if (last.role === 'dj') {
+        last.state = 'done'
+        last.status = null
+      }
       return msgs
 
     case 'error':
       if (last.role === 'dj') {
         last.state = 'error'
         last.errorText = data
+        last.status = null
       }
       return msgs
 
@@ -110,6 +112,14 @@ function resetTyping() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// 自动续播重试（熔断）—— 模块级计时器
+// ═══════════════════════════════════════════════════════════
+
+const AUTO_MAX_RETRIES = 3
+const AUTO_RETRY_DELAY = 4000
+let autoRetryTimer = null
+
+// ═══════════════════════════════════════════════════════════
 // Store
 // ═══════════════════════════════════════════════════════════
 
@@ -120,6 +130,7 @@ export const useChatStore = defineStore('chat', {
     messages: [],
     isProcessing: false,
     jsonDump: '',
+    autoFailCount: 0,
   }),
 
   actions: {
@@ -143,8 +154,9 @@ export const useChatStore = defineStore('chat', {
 
       const player = usePlayerStore()
 
+      this._clearAutoRetry()
+      this.autoFailCount = 0
       this.userInput = ''
-      this.isProcessing = true
       resetTyping()
 
       // 新请求：停止当前播放（触发切歌反馈）并推送消息
@@ -158,16 +170,80 @@ export const useChatStore = defineStore('chat', {
         : 'None'
       const currentlyPlayingId = player.currentTrack?.song_id || ''
 
+      await this._streamRequest(text, {
+        'Currently Playing': currentlyPlaying,
+        'Currently Playing ID': currentlyPlayingId,
+      })
+    },
+
+    /**
+     * DJ 模式自动续播（RFC-020 §2.5）—— 歌曲自然播完后触发。
+     * 不伪造用户气泡；失败自动重试至多 AUTO_MAX_RETRIES 次后熔断。
+     */
+    async autoContinue() {
+      if (this.isProcessing) return
+      const player = usePlayerStore()
+      if (player.isPlaying) return // 已被用户手动接管
+
+      this._clearAutoRetry()
+
+      // 复用上一条失败的自动消息（避免聊天流刷屏），否则新建
+      const last = this.messages[this.messages.length - 1]
+      const reuse = last && last.role === 'dj' && last.auto && last.state !== 'streaming'
+      if (reuse) {
+        last.text = ''
+        last.song = null
+        last.state = 'streaming'
+        last.errorText = ''
+        last.status = null
+      } else {
+        this.messages.push(createDJMessage({ auto: true }))
+      }
+      resetTyping()
+
+      await this._streamRequest('', { 'Auto Continue': 'true' })
+    },
+
+    /**
+     * 列表模式本地直放（RFC-020 §2.5）—— 走 /replay 重解析 mp3，无 LLM。
+     * 不推聊天消息：Now Playing 区 + 历史面板即反馈。
+     */
+    async playLocalSong(songId, { fromEnded = false } = {}) {
+      if (!songId || this.isProcessing) return
+      const player = usePlayerStore()
+
+      // 用户主动切歌 → 上报 song_skipped（自然播完时 finishedReported 已拦截）
+      if (!fromEnded) player.stopTrack()
+      stopSpeech()
+
+      this.isProcessing = true
+      try {
+        const response = await fetch('/api/v1/agent/replay', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ song_id: songId, session_id: this.sessionId }),
+        })
+        if (!response.ok) throw new Error(`REPLAY FAILED (${response.status})`)
+        const song = await response.json()
+        player.playTrack(song)
+      } catch (error) {
+        console.error('Local replay failed:', error)
+      } finally {
+        this.isProcessing = false
+      }
+    },
+
+    /** SSE 请求公共链路（发送 / 自动续播共用） */
+    async _streamRequest(text, context) {
+      const player = usePlayerStore()
+      this.isProcessing = true
       try {
         const response = await fetch('/api/v1/agent/respond/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             user_input: text,
-            context: {
-              'Currently Playing': currentlyPlaying,
-              'Currently Playing ID': currentlyPlayingId,
-            },
+            context,
             session_id: this.sessionId,
           }),
         })
@@ -194,7 +270,7 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
-    /** SSE 事件 → 消息流 + 播放器/语音联动 */
+    /** SSE 事件 → 消息流 + 播放器/语音/歌单联动 */
     handleSSE(event, data, player) {
       switch (event) {
         case 'token':
@@ -216,6 +292,8 @@ export const useChatStore = defineStore('chat', {
           this.messages = applyEvent(this.messages, event, data)
           const last = this.messages[this.messages.length - 1]
           if (last && last.song && last.song.mp3_url) {
+            usePlaylistStore().registerPlay(last.song)
+            this.autoFailCount = 0
             player.playTrack(last.song)
           }
           if (this.messages.length !== before) return
@@ -244,13 +322,36 @@ export const useChatStore = defineStore('chat', {
           }
           break
 
-        case 'error':
+        case 'error': {
           resetTyping()
           this.messages = applyEvent(this.messages, event, data)
+          const last = this.messages[this.messages.length - 1]
+          if (last && last.role === 'dj' && last.auto) {
+            this._scheduleAutoRetry()
+          }
           break
+        }
 
         default:
           break
+      }
+    },
+
+    /** 自动续播失败 → 延迟重试；连续失败达上限 → 熔断（等用户交互恢复） */
+    _scheduleAutoRetry() {
+      this.autoFailCount += 1
+      if (this.autoFailCount >= AUTO_MAX_RETRIES) return
+      this._clearAutoRetry()
+      autoRetryTimer = setTimeout(() => {
+        autoRetryTimer = null
+        this.autoContinue()
+      }, AUTO_RETRY_DELAY)
+    },
+
+    _clearAutoRetry() {
+      if (autoRetryTimer) {
+        clearTimeout(autoRetryTimer)
+        autoRetryTimer = null
       }
     },
   },

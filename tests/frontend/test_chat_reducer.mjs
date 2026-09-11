@@ -45,18 +45,26 @@ describe('chat message reducer', () => {
     assert.equal(msgs[1].song, null);
   });
 
-  it('status searching sets placeholder, found clears it', () => {
+  it('status event sets structured phase (searching → found)', () => {
     let msgs = newConversation('来一首晴天');
     msgs = applyEvent(msgs, 'status', '{"phase":"searching"}');
-    assert.equal(msgs[1].text, 'Searching...');
-    msgs = applyEvent(msgs, 'status', '{"phase":"found","name":"晴天"}');
+    assert.equal(msgs[1].status, 'searching');
     assert.equal(msgs[1].text, '');
+    msgs = applyEvent(msgs, 'status', '{"phase":"found","name":"晴天"}');
+    assert.equal(msgs[1].status, 'found');
   });
 
-  it('done event finalizes streaming state', () => {
+  it('done clears status and finalizes streaming state', () => {
     let msgs = newConversation('x');
+    msgs = applyEvent(msgs, 'status', '{"phase":"searching"}');
     msgs = applyEvent(msgs, 'done', '{}');
     assert.equal(msgs[1].state, 'done');
+    assert.equal(msgs[1].status, null);
+  });
+
+  it('createDJMessage supports auto flag', () => {
+    assert.equal(createDJMessage().auto, false);
+    assert.equal(createDJMessage({ auto: true }).auto, true);
   });
 
   it('error event marks message with errorText', () => {

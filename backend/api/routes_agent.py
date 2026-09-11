@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from backend.api._security import normalize_session_id
 from backend.services.assistant_service import AssistantService
+from backend.tools.netease_api import get_song_mp3_url
 
 
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
@@ -22,6 +23,13 @@ class AgentRequest(BaseModel):
 class AgentResponse(BaseModel):
     reply: dict[str, Any]
     prompt: str
+
+
+class ReplayRequest(BaseModel):
+    """按歌曲 ID 回放（RFC-020 契约 C）。"""
+
+    song_id: str = Field(min_length=1, max_length=64)
+    session_id: str | None = None
 
 
 class FeedbackRequest(BaseModel):
@@ -139,3 +147,66 @@ async def agent_respond_stream(payload: AgentRequest, background_tasks: Backgrou
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/history")
+async def agent_history(
+    scope: Literal["session", "global"] = "global",
+    limit: int = 50,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """播放历史（RFC-020 契约 C）。
+
+    scope=session → 本会话歌单缓存（需 session_id）；scope=global → 跨会话最近播放。
+    只返回元数据；回放请走 POST /replay（mp3 URL 会过期，不缓存）。
+    """
+    sid: str | None = None
+    if scope == "session":
+        if not session_id:
+            raise HTTPException(
+                status_code=400, detail="session_id is required for scope=session",
+            )
+        try:
+            sid = normalize_session_id(session_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    songs = await assistant_service.play_history.list_async(sid, limit=limit)
+    return {"scope": scope, "songs": songs}
+
+
+@router.post("/replay")
+async def agent_replay(payload: ReplayRequest) -> dict[str, Any]:
+    """按 song_id 回放（RFC-020 契约 C）—— 重新解析 mp3_url 后返回。
+
+    列表模式本地切歌 / 历史面板点播走这里；不经过 LLM。
+    回放同样写入播放历史（该曲成为"最近"）。
+    """
+    try:
+        sid = normalize_session_id(payload.session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    row = await assistant_service.play_history.find_async(payload.song_id, sid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="song not found in play history")
+
+    try:
+        mp3_url = await get_song_mp3_url(payload.song_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"failed to resolve audio url: {exc}")
+
+    await assistant_service.play_history.add_async(
+        sid, row, str(row.get("requested_keyword") or ""),
+    )
+
+    return {
+        "song_id": row["song_id"],
+        "name": row["name"],
+        "artist": row["artist"],
+        "cover_url": row["cover_url"],
+        "album": row["album"],
+        "duration_ms": row["duration_ms"],
+        "requested_keyword": row.get("requested_keyword", ""),
+        "mp3_url": mp3_url,
+    }

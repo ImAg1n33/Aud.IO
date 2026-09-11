@@ -141,9 +141,9 @@ class TestMigrationFramework:
             ).fetchone()
         assert row is not None
 
-    def test_current_schema_version_is_6(self, episodic) -> None:
-        """v1-v6 migrations are all applied."""
-        assert episodic._get_schema_version() == 6
+    def test_current_schema_version_is_7(self, episodic) -> None:
+        """v1-v7 migrations are all applied."""
+        assert episodic._get_schema_version() == 7
 
     def test_decay_columns_exist(self, episodic) -> None:
         """Migration v2 added the decay columns."""
@@ -165,7 +165,17 @@ class TestMigrationFramework:
     def test_migration_idempotent(self, episodic) -> None:
         """Re-running init on an already-migrated DB doesn't break."""
         episodic._run_migrations()
-        assert episodic._get_schema_version() == 6
+        assert episodic._get_schema_version() == 7
+
+    def test_play_history_table_exists(self, episodic) -> None:
+        """Migration v7 created play_history (RFC-020 契约 B)."""
+        db_path = str(episodic.db_path)
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='play_history'"
+            ).fetchone()
+        assert row is not None
 
 
 class TestMemoryDecay:

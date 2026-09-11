@@ -41,9 +41,14 @@ from backend.agent.tool_executor import ToolExecutor
 from backend.agent.tts_provider import TTSProvider
 from backend.memory.embedding import EmbeddingProvider
 from backend.memory.episodic_memory import EpisodicMemory
+from backend.memory.play_history import PlayHistoryRepository
 from backend.memory.reflection import SessionReflector
 from backend.services.session_manager import SessionManager
-from backend.tools.netease_api import get_song_mp3_url, search_first_song
+from backend.tools.netease_api import (
+    find_similar_songs,
+    get_song_mp3_url,
+    search_first_song,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,9 @@ class AssistantService:
             db_path=episodic_db_path,  # None triggers data_config defaults
             embedding_provider=embedding_provider,
         )
+        # 播放历史（RFC-020 契约 B）—— 与 episodic 共用同一 SQLite 文件
+        self.play_history = PlayHistoryRepository(self.episodic_memory.db_path)
+        self.play_history.ensure_table()
         self.intent_classifier = IntentClassifier()
         self.tool_executor = ToolExecutor(max_retries=self.MAX_RETRIES)
         self.episodic_provider = EpisodicMemoryProvider(self.episodic_memory)
@@ -193,6 +201,7 @@ class AssistantService:
 
         # Music first — like a DJ dropping the track before speaking
         yield self._sse("music", json.dumps(song_data, ensure_ascii=False))
+        self._record_play_history(sid, song_data)
 
         phase2_prompt = await self._build_phase2_prompt(
             sid, user_input, intent, metadata, song_data,
@@ -246,41 +255,214 @@ class AssistantService:
     ) -> dict[str, Any] | None:
         """查该会话播放历史，返回最近一条 ≠ 当前曲 的歌曲（含 mp3_url）。
 
-        v0.7 P1-2：播放历史在 episodes（song_id 维度），无需额外队列。
+        v0.8：主数据源为 play_history（RFC-020 契约 B —— 去重、上限、
+        元数据齐全）；过渡期回退 episodes（升级前的历史只存在于 episodes，
+        尚未产生 play_history 记录时仍可回退）。
         """
+        current_id = str((metadata or {}).get("Currently Playing ID") or "").strip()
+
+        # ── 主数据源：play_history（新旧→旧） ──
         try:
-            history = await self.episodic_memory.query_recent_played(sid, limit=10)
+            history = await self.play_history.list_async(sid, limit=10)
+        except Exception:
+            history = []
+        if history:
+            if current_id:
+                prev = next(
+                    (h for h in history if str(h.get("song_id")) != current_id),
+                    None,
+                )
+            else:
+                prev = history[1] if len(history) >= 2 else None
+            if prev is not None:
+                return await self._resolve_history_song(prev, "previous")
+
+        # ── 过渡回退：episodes（v0.7 数据源） ──
+        try:
+            snapshots = await self.episodic_memory.query_recent_played(sid, limit=10)
         except Exception:
             return None
+        if not snapshots:
+            return None
 
-        current_id = str((metadata or {}).get("Currently Playing ID") or "").strip()
         if current_id:
-            prev = next(
+            snap = next(
                 (
-                    h for h in history
+                    h for h in snapshots
                     if h.song_id and str(h.song_id) != current_id
                 ),
                 None,
             )
         else:
             # 前端未上报当前曲 ID 时，取倒数第二条（避免重播当前曲）
-            prev = history[1] if len(history) >= 2 else None
+            snap = snapshots[1] if len(snapshots) >= 2 else None
 
-        if prev is None or not prev.song_id or not prev.played_song_name:
+        if snap is None or not snap.song_id or not snap.played_song_name:
             return None
 
+        return await self._resolve_history_song(
+            {
+                "song_id": str(snap.song_id),
+                "name": snap.played_song_name,
+                "artist": snap.played_song_artist or "",
+            },
+            "previous",
+        )
+
+    async def _resolve_history_song(
+        self, row: dict[str, Any], keyword: str,
+    ) -> dict[str, Any] | None:
+        """历史记录 → 可播放歌曲载荷（重新解析 mp3_url，URL 会过期）。"""
+        song_id = str(row.get("song_id") or "").strip()
+        if not song_id:
+            return None
         try:
-            mp3_url = await get_song_mp3_url(str(prev.song_id))
+            mp3_url = await get_song_mp3_url(song_id)
         except Exception:
             return None
-
         return {
-            "song_id": str(prev.song_id),
-            "name": prev.played_song_name,
-            "artist": prev.played_song_artist or "",
+            "song_id": song_id,
+            "name": row.get("name", ""),
+            "artist": row.get("artist", ""),
+            "cover_url": row.get("cover_url", ""),
+            "album": row.get("album", ""),
+            "duration_ms": row.get("duration_ms"),
             "mp3_url": mp3_url,
-            "requested_keyword": "previous",
+            "requested_keyword": keyword,
         }
+
+    # ================================================================
+    # 自动续播（RFC-020 契约 D）—— DJ 模式电台式连续播放
+    # ================================================================
+
+    AUTO_CONTINUE_EXCLUDE = 10  # 排除本会话最近 N 首（避免电台循环重复）
+
+    @staticmethod
+    def _is_auto_continue(metadata: dict[str, Any] | None) -> bool:
+        value = (metadata or {}).get("Auto Continue")
+        return str(value).strip().lower() == "true"
+
+    async def _auto_continue_stream(
+        self, sid: str, ctx: Any, metadata: dict[str, Any], started: float,
+    ) -> AsyncGenerator[str, None]:
+        """DJ 模式自动续播：无用户输入 → 按品味选下一首 → 复用 Two-Pass 台词流。
+
+        选曲策略（快 → 慢）：
+        1. 上一首的相似歌曲（/simi/song 真实音乐关系，无 LLM 延迟）
+        2. LLM 带工具按画像挑歌（附"排除最近播放"提示）
+        最近 AUTO_CONTINUE_EXCLUDE 首全部排除，避免电台循环重复。
+        """
+        intent = Intent.MUSIC_PLAY
+        user_input = "（自动续播）"
+        try:
+            recent = await self.play_history.list_async(
+                sid, limit=self.AUTO_CONTINUE_EXCLUDE + 2,
+            )
+        except Exception:
+            recent = []
+        excluded = {str(h.get("song_id")) for h in recent[: self.AUTO_CONTINUE_EXCLUDE]}
+
+        song_data = await self._auto_pick_song(sid, ctx, recent, excluded)
+        if song_data is None:
+            logger.info("Auto continue: no candidate (excluded=%d)", len(excluded))
+            self._trace(sid, user_input, intent, "auto_dj", started, error="no candidate")
+            yield self._sse("error", "电台没找到合适的下一首——说句话我继续。")
+            return
+
+        logger.info(
+            "Auto continue: %s - %s", song_data["artist"], song_data["name"],
+        )
+        async for sse in self._stream_resolved_song(
+            sid, ctx, user_input, intent, metadata, song_data,
+            started, path="auto_dj",
+        ):
+            yield sse
+
+    async def _auto_pick_song(
+        self, sid: str, ctx: Any, recent: list[dict[str, Any]],
+        excluded: set[str],
+    ) -> dict[str, Any] | None:
+        """自动续播选曲：相似优先（快），LLM 兜底（品味）。"""
+        disliked = self._disliked_artists(ctx)
+
+        # 策略 1：上一首的相似歌曲（真实音乐关系，无 LLM 延迟）
+        if recent:
+            last_id = str(recent[0].get("song_id") or "")
+            try:
+                candidates = await find_similar_songs(last_id, limit=10)
+            except Exception:
+                candidates = []
+            for cand in candidates:
+                if str(cand.get("id")) in excluded:
+                    continue
+                if self._matched_disliked({"artist": cand.get("artist")}, disliked):
+                    continue
+                resolved = await self._resolve_candidate(cand)
+                if resolved is not None:
+                    return resolved
+
+        # 策略 2：LLM 按画像挑歌（带排除提示）
+        return await self._auto_pick_via_llm(sid, recent, disliked, excluded)
+
+    async def _resolve_candidate(self, cand: dict[str, Any]) -> dict[str, Any] | None:
+        """相似候选 → 可播放载荷（解析 mp3_url，失败跳过）。"""
+        try:
+            mp3_url = await get_song_mp3_url(str(cand["id"]))
+        except Exception:
+            return None
+        return {
+            "song_id": str(cand["id"]),
+            "name": cand.get("name", ""),
+            "artist": cand.get("artist", ""),
+            "cover_url": cand.get("cover_url", ""),
+            "album": cand.get("album", ""),
+            "duration_ms": cand.get("duration_ms"),
+            "mp3_url": mp3_url,
+            "requested_keyword": "auto",
+        }
+
+    async def _auto_pick_via_llm(
+        self, sid: str, recent: list[dict[str, Any]],
+        disliked: list[str], excluded: set[str],
+    ) -> dict[str, Any] | None:
+        """LLM 带工具按画像挑歌 —— 排除最近播放与 disliked 后返回。"""
+        assembler = self._build_context_assembler(sid)
+        hint = "换一首。自动续播：根据我的音乐口味挑一首新的歌。"
+        if recent:
+            names = "；".join(
+                f"{h.get('artist', '')} - {h.get('name', '')}"
+                for h in recent[: self.AUTO_CONTINUE_EXCLUDE]
+            )
+            hint += f" 不要重复最近播放过的：{names}。"
+        try:
+            prompt = await assembler.assemble(
+                hint, Intent.MUSIC_PLAY, {},
+                tool_constraints=TOOL_CONSTRAINTS, session_id=sid,
+            )
+            tools = self._build_tool_schemas(Intent.MUSIC_PLAY)
+            reply = await call_llm(
+                NON_STREAMING_SYSTEM, prompt, tools=tools, force_tools=True,
+            )
+            actions = self._parse_actions_from_reply(reply)
+            if not actions:
+                return None
+            results = await self.tool_executor.execute_actions(actions)
+            merged = await self._merge_tool_results(reply, results)
+        except Exception:
+            logger.warning("Auto continue LLM pick failed", exc_info=True)
+            return None
+
+        music = merged.get("music")
+        if not isinstance(music, dict) or not music.get("song_id"):
+            return None
+        if str(music.get("song_id")) in excluded:
+            return None
+        if self._matched_disliked(music, disliked):
+            return None
+        if not music.get("mp3_url"):
+            return None
+        music["requested_keyword"] = "auto"
+        return music
 
     # ================================================================
     # 口味硬约束（v0.7 P0-2）—— disliked 播放前校验
@@ -452,11 +634,21 @@ class AssistantService:
         ctx = self.session_manager.get_or_create(sid)
         self._ensure_memory_manager(sid)
 
+        metadata: dict[str, Any] = dict(context or {})
+        started = time.monotonic()
+
+        # ═══════════════════════════════════════════════════════════
+        # 自动续播（RFC-020 契约 D）：DJ 模式歌曲播完，按品味选下一首 ——
+        # 无用户输入，走独立的快选路径（相似歌曲优先，LLM 兜底）
+        # ═══════════════════════════════════════════════════════════
+        if self._is_auto_continue(metadata):
+            async for sse in self._auto_continue_stream(sid, ctx, metadata, started):
+                yield sse
+            return
+
         # === PERCEIVE ===
         intent = await self.intent_classifier.classify_async(user_input)
         logger.debug("Intent: %s, input: %.60s...", intent.value, user_input)
-        metadata: dict[str, Any] = dict(context or {})
-        started = time.monotonic()
         phase1_missed = False
 
         # ═══════════════════════════════════════════════════════════
@@ -645,6 +837,7 @@ class AssistantService:
         music = final_reply.get("music")
         if isinstance(music, dict) and music.get("song_id"):
             yield self._sse("music", json.dumps(music, ensure_ascii=False))
+            self._record_play_history(sid, music)
 
         # 音乐已开播：文案为空（required 只出 tool_calls）或音乐意图静默预取
         # （模型文本不可靠）→ 用 Phase 2 流程（Hitting the Post）在前奏上生成
@@ -805,11 +998,27 @@ class AssistantService:
                 "song_id": search_result["id"],
                 "name": search_result["name"],
                 "artist": search_result["artist"],
+                "cover_url": search_result.get("cover_url", ""),
+                "album": search_result.get("album", ""),
+                "duration_ms": search_result.get("duration_ms"),
                 "mp3_url": mp3_url,
                 "requested_keyword": play_kw,
             }
         except Exception:
             return None
+
+    def _record_play_history(self, sid: str, song: Any) -> None:
+        """music 事件发出即写入播放历史（RFC-020 契约 B，失败静默）。"""
+        if not isinstance(song, dict) or not song.get("song_id"):
+            return
+        try:
+            asyncio.ensure_future(
+                self.play_history.add_async(
+                    sid, song, str(song.get("requested_keyword") or ""),
+                )
+            )
+        except Exception:
+            logger.warning("播放历史写入调度失败（不影响播放）", exc_info=True)
 
     @staticmethod
     def _sse(event: str, data: str) -> str:
@@ -953,6 +1162,9 @@ class AssistantService:
                     "song_id": result.data.get("song_id", ""),
                     "name": result.data.get("name", ""),
                     "artist": result.data.get("artist", ""),
+                    "cover_url": result.data.get("cover_url", ""),
+                    "album": result.data.get("album", ""),
+                    "duration_ms": result.data.get("duration_ms"),
                 }
                 sid = result.data.get("song_id", "")
                 if sid:

@@ -1,11 +1,14 @@
 import { defineStore } from 'pinia'
 import { sendFeedback } from './feedback.js'
+import { nextMode } from './queue.js'
 
 // Non-reactive internals — Web Audio API objects don't benefit from Vue reactivity
 let audioCtx = null
 let fadeGain = null
 let fadeTimer = null
 let audioElement = null
+let analyser = null
+let freqBuffer = null
 let playbackStartAt = null   // 当前曲目开始播放的时间戳（反馈时长计算）
 let finishedReported = false // 本曲是否已上报 finished（防止 stop 重复上报 skip）
 
@@ -37,8 +40,12 @@ export const usePlayerStore = defineStore('player', {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)()
         const source = audioCtx.createMediaElementSource(audioElement)
         const gain = audioCtx.createGain()
+        analyser = audioCtx.createAnalyser()
+        analyser.fftSize = 64
+        analyser.smoothingTimeConstant = 0.82
         source.connect(gain)
-        gain.connect(audioCtx.destination)
+        gain.connect(analyser)
+        analyser.connect(audioCtx.destination)
         fadeGain = gain
       }
 
@@ -96,6 +103,9 @@ export const usePlayerStore = defineStore('player', {
       this.attachAudio(audioElement)
       await this._ensureAudioRunning()
 
+      // 立即播放场景（列表模式本地切歌）必须清掉 stopTrack 的延迟暂停定时器
+      if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null }
+
       // Cancel any pending fades (from stopTrack) and reset gain immediately
       if (fadeGain) {
         fadeGain.gain.cancelScheduledValues(audioCtx.currentTime)
@@ -151,14 +161,33 @@ export const usePlayerStore = defineStore('player', {
       }
     },
 
-    /** MODE: dj / loop / list —— loop 模式下循环播放当前曲 */
+    /** MODE: dj / loop / list-loop / list-shuffle —— RFC-020 §2.5 模式语义 */
     toggleMode() {
-      const modes = ['dj', 'loop', 'list']
-      const idx = modes.indexOf(this.playMode)
-      this.playMode = modes[(idx + 1) % modes.length]
+      this.setMode(nextMode(this.playMode))
+    },
+
+    setMode(mode) {
+      this.playMode = mode
       if (audioElement) {
-        audioElement.loop = this.playMode === 'loop'
+        audioElement.loop = mode === 'loop'
       }
+    },
+
+    /** 频谱采样（bars 个频段，值 0-1）—— 可视化组件在 rAF 中调用 */
+    spectrum(bars = 12) {
+      if (!analyser || !this.isPlaying) return new Array(bars).fill(0)
+      if (!freqBuffer || freqBuffer.length !== analyser.frequencyBinCount) {
+        freqBuffer = new Uint8Array(analyser.frequencyBinCount)
+      }
+      analyser.getByteFrequencyData(freqBuffer)
+      const out = new Array(bars).fill(0)
+      const usable = Math.max(1, Math.floor(freqBuffer.length * 0.72)) // 高频段多为空
+      for (let i = 0; i < usable; i++) {
+        const bucket = Math.floor((i / usable) * bars)
+        const value = freqBuffer[i] / 255
+        if (value > out[bucket]) out[bucket] = value
+      }
+      return out
     },
 
     /** 音量（0-1，本地记忆） */

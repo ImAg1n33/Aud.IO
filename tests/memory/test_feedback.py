@@ -48,7 +48,7 @@ class TestFeedbackMigration:
 
         mgr = MigrationManager(db)
         mgr.initialize_tables()
-        assert mgr.get_version() == 6
+        assert mgr.get_version() == 7
 
         with sqlite3.connect(str(db)) as conn:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(episodes)")}

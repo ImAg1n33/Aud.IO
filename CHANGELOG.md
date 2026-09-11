@@ -6,11 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **播放模式四分（RFC-020）**：DJ 电台 / 单曲循环 / 列表循环 / 列表随机 ——
+  `queue.js` 纯逻辑 + 模式切换器；列表模式本地直放（无 LLM 等待），缓存不足
+  优雅回退 Agent
+- **DJ 电台自动续播**：歌曲自然播完 → 自动选下一首（相似歌曲优先，
+  LLM 按画像兜底），排除本会话最近 10 首防重复；不伪造用户气泡（AUTO 标记）；
+  失败 4s 重试、连续 3 次熔断；trace `path=auto_dj`
+- **播放历史（迁移 v7）**：`play_history` 表 —— 每次 music 发出即写入 +
+  会话内去重；会话缓存 50 / 跨会话最近 100 自动淘汰；mp3 URL 永不缓存
+- **历史与回放 API**：`GET /v1/agent/history?scope=session|global` +
+  `POST /v1/agent/replay`（重解析 mp3_url，兼作列表模式播放通道）
+- **歌曲元数据**：`music` 载荷新增 `cover_url` / `album` / `duration_ms`
+  （cloudsearch 透传），前端封面图 + 时长即刻可用
+- **前端 v0.8 体验重设计**：常驻 Now Playing（standby 态等价，零布局跳变）、
+  历史抽屉（本会话/最近，点播回放）、结构化搜索状态编排、频谱可视化
+  （AnalyserNode）、字体自托管（Doto/Space Grotesk/Space Mono woff2，
+  运行时零外网请求）、主题防闪（内联脚本）、focus-visible / aria /
+  prefers-reduced-motion、空态示例一键发送、消息流自动跟随（上滚不打扰）
+
 ### Fixed
 - **重复问候**：EnvironmentProvider 每次请求都注入"Use the time of day in your
   greeting" + Phase 2 结构把"time"列为第一锚点 → "换一首"等后续回复每条都以
   "早上好"开头。改为：时间问候仅限新会话首条；Phase 2 锚点优先用户话语/心情；
   Single-Pass 输出规则同步禁止会话中途重复问候（实测 1 问候 + 3 换歌无复读）
+- **本地即时切歌被延迟暂停**：`stopTrack()` 的 1.3s 淡出定时器未在
+  `playTrack()` 清除，列表模式本地直放会被旧定时器暂停 → 播放时清理
 ## [0.7.0] — 2026-09-10
 
 ### Added

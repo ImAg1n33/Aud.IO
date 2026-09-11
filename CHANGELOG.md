@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- **重复问候**：EnvironmentProvider 每次请求都注入"Use the time of day in your
+  greeting" + Phase 2 结构把"time"列为第一锚点 → "换一首"等后续回复每条都以
+  "早上好"开头。改为：时间问候仅限新会话首条；Phase 2 锚点优先用户话语/心情；
+  Single-Pass 输出规则同步禁止会话中途重复问候（实测 1 问候 + 3 换歌无复读）
 ## [0.7.0] — 2026-09-10
 
 ### Added

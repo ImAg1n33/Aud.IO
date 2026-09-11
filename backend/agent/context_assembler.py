@@ -177,9 +177,11 @@ class EnvironmentProvider(ContextProvider):
 
         lines = "[Current Environment]\n" + "\n".join(parts)
         lines += (
-            "\n(Use the time of day naturally in your greeting. "
-            "Reference weather ONLY if it genuinely fits the mood — "
-            "never force it or invent details like wind/rain that aren't shown above.)"
+            "\n(Greet with the time of day ONLY when opening a new conversation. "
+            "If there is any previous conversation above, do NOT greet again — "
+            "just continue naturally. Reference weather ONLY if it genuinely fits "
+            "the mood — never force it or invent details like wind/rain that aren't "
+            "shown above.)"
         )
         return lines
 

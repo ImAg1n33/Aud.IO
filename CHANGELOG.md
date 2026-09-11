@@ -25,7 +25,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   运行时零外网请求）、主题防闪（内联脚本）、focus-visible / aria /
   prefers-reduced-motion、空态示例一键发送、消息流自动跟随（上滚不打扰）
 
+### Changed
+- **DJ 语气专业化（prompt 调优）**：实测反馈"像朋友但不够专业"——自动续播会
+  罗列已播歌曲（"A、B、C 都放完了"），且高频套话（"钢琴一进来就是那种…"、
+  "整个人都…"、"心就软了"）。Prompt 强化：禁止回放清单/过渡播报、扩充
+  AI 腔禁词表（整个人都/心都软了/一进来/绝了…）、要求以具体音乐信息
+  （乐器编制/制作/年代/词曲作者）替代情绪化比喻（实测：罗列消失，
+  输出转为词作/编曲细节）
+
 ### Fixed
+- **AUTO 续播覆盖上一条消息**：`autoContinue` 的消息复用条件写成"非 streaming"
+  （成功消息也被复用）→ 第三首会把第二首的歌曲卡片覆盖掉。收紧为
+  **仅复用失败（error）的自动消息**做重试；成功消息永不复用（纯函数
+  `shouldReuseAutoMessage` + Node 测试回归）
 - **重复问候**：EnvironmentProvider 每次请求都注入"Use the time of day in your
   greeting" + Phase 2 结构把"time"列为第一锚点 → "换一首"等后续回复每条都以
   "早上好"开头。改为：时间问候仅限新会话首条；Phase 2 锚点优先用户话语/心情；

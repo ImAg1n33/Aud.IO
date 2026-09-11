@@ -4,6 +4,7 @@ import {
   applyEvent,
   createDJMessage,
   createUserMessage,
+  shouldReuseAutoMessage,
 } from '../../frontend/src/stores/chat.js';
 
 function newConversation(userText) {
@@ -65,6 +66,14 @@ describe('chat message reducer', () => {
   it('createDJMessage supports auto flag', () => {
     assert.equal(createDJMessage().auto, false);
     assert.equal(createDJMessage({ auto: true }).auto, true);
+  });
+
+  it('auto message reuse only for failed attempts (not successful ones)', () => {
+    assert.equal(shouldReuseAutoMessage(null), false);
+    assert.equal(shouldReuseAutoMessage({ role: 'dj', auto: false, state: 'error' }), false);
+    assert.equal(shouldReuseAutoMessage({ role: 'dj', auto: true, state: 'streaming' }), false);
+    assert.equal(shouldReuseAutoMessage({ role: 'dj', auto: true, state: 'done' }), false);
+    assert.equal(shouldReuseAutoMessage({ role: 'dj', auto: true, state: 'error' }), true);
   });
 
   it('error event marks message with errorText', () => {

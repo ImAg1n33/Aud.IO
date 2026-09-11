@@ -20,6 +20,15 @@ export function createDJMessage({ auto = false } = {}) {
 }
 
 /**
+ * 自动续播消息复用决策（纯函数，可测）：
+ * 仅复用「上一条失败的自动消息」做重试，避免聊天流刷屏；
+ * 成功的自动消息（done）绝不复用——否则下一首会覆盖上一首的内容。
+ */
+export function shouldReuseAutoMessage(last) {
+  return Boolean(last && last.role === 'dj' && last.auto && last.state === 'error')
+}
+
+/**
  * 将一条 SSE 事件应用到消息列表（返回新数组，最后一则 dj 消息被更新）。
  * token 事件不在此处理——打字机由 store 的 appendToken 逐字符推进。
  */
@@ -187,9 +196,9 @@ export const useChatStore = defineStore('chat', {
 
       this._clearAutoRetry()
 
-      // 复用上一条失败的自动消息（避免聊天流刷屏），否则新建
+      // 复用上一条「失败的」自动消息（重试不刷屏）；成功消息不复用（否则覆盖上一首）
       const last = this.messages[this.messages.length - 1]
-      const reuse = last && last.role === 'dj' && last.auto && last.state !== 'streaming'
+      const reuse = shouldReuseAutoMessage(last)
       if (reuse) {
         last.text = ''
         last.song = null

@@ -98,9 +98,10 @@ async def agent_respond(payload: AgentRequest, background_tasks: BackgroundTasks
     final_reply, prompt = await assistant_service.generate_reply(
         payload.user_input, payload.context, session_id=sid,
     )
-    assistant_service.schedule_profile_update(
-        background_tasks, payload.user_input, final_reply, session_id=sid,
-    )
+    if not AssistantService._is_no_record(payload.context):
+        assistant_service.schedule_profile_update(
+            background_tasks, payload.user_input, final_reply, session_id=sid,
+        )
     return AgentResponse(reply=final_reply, prompt=prompt)
 
 
@@ -132,7 +133,7 @@ async def agent_respond_stream(payload: AgentRequest, background_tasks: Backgrou
                     pass
             yield sse_msg
 
-        if full_reply:
+        if full_reply and not AssistantService._is_no_record(payload.context):
             assistant_service.schedule_profile_update(
                 background_tasks, payload.user_input, full_reply,
                 session_id=sid,

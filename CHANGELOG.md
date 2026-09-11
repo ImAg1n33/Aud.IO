@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   失败 4s 重试、连续 3 次熔断；trace `path=auto_dj`
 - **播放历史（迁移 v7）**：`play_history` 表 —— 每次 music 发出即写入 +
   会话内去重；会话缓存 50 / 跨会话最近 100 自动淘汰；mp3 URL 永不缓存
+- **`No Record` 测试卫生标志**：`context: {"No Record": "true"}` 的请求跳过
+  播放历史 / 情节记忆 / 画像更新 —— 自动化冒烟测试不再污染真实用户数据
 - **历史与回放 API**：`GET /v1/agent/history?scope=session|global` +
   `POST /v1/agent/replay`（重解析 mp3_url，兼作列表模式播放通道）
 - **歌曲元数据**：`music` 载荷新增 `cover_url` / `album` / `duration_ms`
@@ -31,7 +33,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   "整个人都…"、"心就软了"）。Prompt 强化：禁止回放清单/过渡播报、扩充
   AI 腔禁词表（整个人都/心都软了/一进来/绝了…）、要求以具体音乐信息
   （乐器编制/制作/年代/词曲作者）替代情绪化比喻（实测：罗列消失，
-  输出转为词作/编曲细节）
+  输出转为词作/编曲细节）；第二轮针对"口语化但别扭"的语域问题
+  （"那股子复古 funk 的劲儿就对了…稳。"）：定义语域基准（深夜电台音乐编辑）
+  + BAD/GOOD 对照示例，新增俚语禁词（那股子/劲儿就对了/走起/带感/上头/拿捏…），
+  禁止单字成句评价
 
 ### Fixed
 - **AUTO 续播覆盖上一条消息**：`autoContinue` 的消息复用条件写成"非 streaming"

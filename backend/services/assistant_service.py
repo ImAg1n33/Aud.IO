@@ -201,7 +201,7 @@ class AssistantService:
 
         # Music first — like a DJ dropping the track before speaking
         yield self._sse("music", json.dumps(song_data, ensure_ascii=False))
-        self._record_play_history(sid, song_data)
+        self._record_play_history(sid, song_data, metadata)
 
         phase2_prompt = await self._build_phase2_prompt(
             sid, user_input, intent, metadata, song_data,
@@ -240,13 +240,14 @@ class AssistantService:
             user_input, reply.get("answer", ""),
             intent=str(intent), played_song=song_data,
         )
-        asyncio.ensure_future(
-            self.episodic_memory.store_snapshot(
-                user_input, reply.get("answer", ""),
-                played_song=song_data, session_id=sid,
+        if not self._is_no_record(metadata):
+            asyncio.ensure_future(
+                self.episodic_memory.store_snapshot(
+                    user_input, reply.get("answer", ""),
+                    played_song=song_data, session_id=sid,
+                )
             )
-        )
-        self._maybe_reflect(sid, ctx)
+            self._maybe_reflect(sid, ctx)
         self._trace(sid, user_input, intent, path, started, final_reply)
         yield self._sse("done", json.dumps(final_reply, ensure_ascii=False))
 
@@ -340,6 +341,16 @@ class AssistantService:
     @staticmethod
     def _is_auto_continue(metadata: dict[str, Any] | None) -> bool:
         value = (metadata or {}).get("Auto Continue")
+        return str(value).strip().lower() == "true"
+
+    @staticmethod
+    def _is_no_record(metadata: dict[str, Any] | None) -> bool:
+        """测试/调试请求标志（RFC-020 数据卫生）——不写历史/记忆/画像。
+
+        自动化冒烟脚本必须携带 context: {"No Record": "true"}，
+        否则会污染真实用户的播放历史与画像更新。
+        """
+        value = (metadata or {}).get("No Record")
         return str(value).strip().lower() == "true"
 
     async def _auto_continue_stream(
@@ -604,16 +615,18 @@ class AssistantService:
                 played_song=played_song,
             )
 
-            asyncio.ensure_future(
-                self.episodic_memory.store_snapshot(
-                    user_input,
-                    final_reply.get("answer", ""),
-                    played_song=played_song,
-                    session_id=sid,
+            if not self._is_no_record(metadata):
+                asyncio.ensure_future(
+                    self.episodic_memory.store_snapshot(
+                        user_input,
+                        final_reply.get("answer", ""),
+                        played_song=played_song,
+                        session_id=sid,
+                    )
                 )
-            )
 
-        self._maybe_reflect(sid, ctx)
+        if not self._is_no_record(metadata):
+            self._maybe_reflect(sid, ctx)
         self._trace(sid, user_input, intent, "generate_reply", started, final_reply)
         return final_reply, user_prompt
 
@@ -837,7 +850,7 @@ class AssistantService:
         music = final_reply.get("music")
         if isinstance(music, dict) and music.get("song_id"):
             yield self._sse("music", json.dumps(music, ensure_ascii=False))
-            self._record_play_history(sid, music)
+            self._record_play_history(sid, music, metadata)
 
         # 音乐已开播：文案为空（required 只出 tool_calls）或音乐意图静默预取
         # （模型文本不可靠）→ 用 Phase 2 流程（Hitting the Post）在前奏上生成
@@ -887,15 +900,16 @@ class AssistantService:
             intent=str(intent),
             played_song=played_song,
         )
-        asyncio.ensure_future(
-            self.episodic_memory.store_snapshot(
-                user_input,
-                final_reply.get("answer", ""),
-                played_song=played_song,
-                session_id=sid,
+        if not self._is_no_record(metadata):
+            asyncio.ensure_future(
+                self.episodic_memory.store_snapshot(
+                    user_input,
+                    final_reply.get("answer", ""),
+                    played_song=played_song,
+                    session_id=sid,
+                )
             )
-        )
-        self._maybe_reflect(sid, ctx)
+            self._maybe_reflect(sid, ctx)
         self._trace(
             sid, user_input, intent,
             "single_pass_phase1_miss" if phase1_missed else "single_pass",
@@ -1007,8 +1021,15 @@ class AssistantService:
         except Exception:
             return None
 
-    def _record_play_history(self, sid: str, song: Any) -> None:
-        """music 事件发出即写入播放历史（RFC-020 契约 B，失败静默）。"""
+    def _record_play_history(
+        self, sid: str, song: Any, metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """music 事件发出即写入播放历史（RFC-020 契约 B，失败静默）。
+
+        No Record（测试）请求不写入 —— 防止自动化测试污染真实历史。
+        """
+        if self._is_no_record(metadata):
+            return
         if not isinstance(song, dict) or not song.get("song_id"):
             return
         try:

@@ -1422,3 +1422,29 @@ class TestAutoContinue:
 
         assert any("event: error" in e for e in events)
         assert not any("event: music" in e for e in events)
+
+
+class TestNoRecord:
+    """数据卫生（RFC-020）—— 测试请求（No Record）不写历史/记忆/画像。"""
+
+    def test_no_record_detection(self) -> None:
+        assert AssistantService._is_no_record({"No Record": "true"}) is True
+        assert AssistantService._is_no_record({"No Record": "TRUE"}) is True
+        assert AssistantService._is_no_record({}) is False
+        assert AssistantService._is_no_record(None) is False
+
+    @pytest.mark.asyncio
+    async def test_no_record_skips_play_history(self, service, monkeypatch) -> None:
+        calls: list[str] = []
+
+        async def fake_add(session_id, song, requested_keyword=""):
+            calls.append(str(song.get("song_id")))
+            return 1
+
+        monkeypatch.setattr(service.play_history, "add_async", fake_add)
+
+        service._record_play_history("s1", {"song_id": "a"}, {"No Record": "true"})
+        service._record_play_history("s1", {"song_id": "b"}, {})
+        await asyncio.sleep(0.05)
+
+        assert calls == ["b"]

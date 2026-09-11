@@ -52,7 +52,7 @@ Non-streaming agent pipeline. Full response returned at once.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `user_input` | string | yes | User's raw message |
-| `context` | object | no | Frontend context (`Currently Playing`, `Currently Playing ID`, `Auto Continue`) |
+| `context` | object | no | Frontend context (`Currently Playing`, `Currently Playing ID`, `Auto Continue`, `No Record` [testing]) |
 | `session_id` | string | no | UUID session identifier (auto-generated if absent) |
 
 **Response** `200`:
@@ -197,6 +197,10 @@ empty `user_input` to request the next track for continuous playback. The backen
 picks via similar-song data first (LLM taste-based fallback), excludes the session's
 last 10 tracks, and streams the normal `music` + `token` + `done` sequence
 (trace path `auto_dj`). If nothing is available it emits an `error` event.
+
+**No Record (testing hygiene)**: `context: {"No Record": "true"}` skips all writes —
+play history, episodic memory snapshots, and profile updates. Automated smoke tests
+MUST set this flag; otherwise they pollute the real user's data.
 
 **SSE Event Types**:
 

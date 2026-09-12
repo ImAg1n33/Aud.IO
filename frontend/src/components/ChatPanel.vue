@@ -45,6 +45,9 @@ watch(() => chat.messages[chat.messages.length - 1]?.text, scrollToBottom)
   <main class="chat-area">
     <!-- 空态引导 -->
     <div class="empty-state" v-if="chat.messages.length === 0">
+      <div class="empty-emblem" aria-hidden="true">
+        <i v-for="n in 25" :key="n"></i>
+      </div>
       <p class="empty-title">你的私人 AI DJ 已就位</p>
       <p class="empty-hint">试试说：</p>
       <div class="empty-examples">
@@ -57,7 +60,7 @@ watch(() => chat.messages[chat.messages.length - 1]?.text, scrollToBottom)
           {{ example }}
         </button>
       </div>
-      <p class="empty-shortcut">Ctrl+K 或 / 聚焦输入 · 空格播放/暂停</p>
+      <p class="empty-shortcut">Ctrl+K 或 / 聚焦输入 · 空格播放/暂停 · H 播放历史</p>
     </div>
 
     <!-- 消息流 -->
@@ -72,7 +75,7 @@ watch(() => chat.messages[chat.messages.length - 1]?.text, scrollToBottom)
           <!-- 搜索/调谐状态（结构化，不再塞进正文） -->
           <template v-if="msg.state === 'streaming' && !msg.text && msg.status">
             <div class="status-line" :class="{ found: msg.status === 'found' }">
-              <span class="status-pulse"></span>
+              <span class="status-dots"><i></i><i></i><i></i></span>
               {{ msg.status === 'searching' ? 'SEARCHING' : 'TUNING IN' }}
             </div>
           </template>

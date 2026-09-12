@@ -11,6 +11,7 @@ const playlist = usePlaylistStore()
 
 // ── 可视化：点阵频谱（reduced-motion 时静态） ──
 const BARS = 14
+const VIZ_DOTS = 7
 const bars = ref(new Array(BARS).fill(0.04))
 const reducedMotion =
   typeof window !== 'undefined' &&
@@ -109,11 +110,13 @@ function onSeekKey(e) {
         </div>
 
         <div class="viz" :class="{ active: player.isPlaying }" aria-hidden="true">
-          <i
-            v-for="(level, i) in bars"
-            :key="i"
-            :style="{ height: `${Math.max(4, Math.round(level * 100))}%` }"
-          ></i>
+          <span v-for="(level, i) in bars" :key="i" class="viz-col">
+            <i
+              v-for="dot in VIZ_DOTS"
+              :key="dot"
+              :class="{ lit: dot <= Math.round(level * VIZ_DOTS) }"
+            ></i>
+          </span>
         </div>
       </div>
 

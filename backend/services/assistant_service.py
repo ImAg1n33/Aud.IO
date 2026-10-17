@@ -985,8 +985,8 @@ class AssistantService:
         (role="user") to disambiguate song-title vs emotion.
 
         走 request_json_object（JSON 模式）而非 call_llm：call_llm 的非工具分支
-        硬编码 play_keyword=""（见 llm_client._request_chat_plain），返回值永远
-        拿不到关键词，会让本函数恒返回 None（N1）。
+        只跑自然语言补全（_request_chat_plain），返回值里根本不存在 play_keyword
+        （N23 之前是硬编码空串，现在是字段已被删除），会让本函数恒返回 None（N1）。
         """
         ctx = self.session_manager.get_or_create(sid)
         currently_playing = (metadata or {}).get("Currently Playing", "")
@@ -1228,7 +1228,9 @@ class AssistantService:
     def _build_graceful_fallback(reply: dict[str, Any]) -> dict[str, Any]:
         degraded = dict(reply)
         degraded.pop("music", None)
-        degraded["play_keyword"] = ""
+        # play_keyword 已从 LLM 回复契约中移除（RFC-019 / N23）；这里用 pop 而非
+        # 直接删行，可顺带剥离 mock / 历史残留，避免旧数据把死字段带回响应体。
+        degraded.pop("play_keyword", None)
 
         degraded["answer"] = GRACEFUL_FALLBACK_TEXT
         degraded["say"] = GRACEFUL_FALLBACK_TEXT

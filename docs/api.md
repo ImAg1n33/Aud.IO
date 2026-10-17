@@ -62,7 +62,6 @@ Non-streaming agent pipeline. Full response returned at once.
     "analysis": "brief reasoning",
     "answer": "user-facing response text",
     "actions": [],
-    "play_keyword": "Artist SongTitle",
     "provider": "deepseek",
     "model": "deepseek-v4-flash",
     "music": {

@@ -255,7 +255,6 @@ def _normalize_response(payload: dict[str, Any], provider: str, model: str) -> d
     analysis = payload.get("analysis", "")
     answer = payload.get("answer", "")
     actions = payload.get("actions", [])
-    play_keyword = payload.get("play_keyword", "")
 
     if not isinstance(analysis, str):
         analysis = str(analysis)
@@ -267,14 +266,11 @@ def _normalize_response(payload: dict[str, Any], provider: str, model: str) -> d
         actions = [str(actions)] if actions not in (None, "") else []
     else:
         actions = [item for item in actions if isinstance(item, (dict, str))]
-    if not isinstance(play_keyword, str):
-        play_keyword = str(play_keyword)
 
     return {
         "analysis": analysis,
         "answer": answer,
         "actions": actions,
-        "play_keyword": play_keyword.strip(),
         "provider": provider,
         "model": model,
     }
@@ -307,7 +303,6 @@ async def call_llm(
     - analysis: brief reasoning summary (may be empty)
     - answer: final user-facing answer
     - actions: tool calls as [{"tool": name, ...args}] (RFC: function calling)
-    - play_keyword: "Artist SongTitle" or empty string
     """
     config = _get_llm_config(model_override=model)
 
@@ -316,7 +311,6 @@ async def call_llm(
             "analysis": "Missing API key.",
             "answer": "LLM_API_KEY is not configured.",
             "actions": ["Set backend/.env with LLM_API_KEY and retry."],
-            "play_keyword": "",
             "provider": config["provider"],
             "model": config["model"],
         }
@@ -336,7 +330,6 @@ async def call_llm(
                 "analysis": "",
                 "answer": content or "",
                 "actions": _tool_calls_to_actions(tool_calls),
-                "play_keyword": "",
             }
         else:
             # 自然语言路径——绝不用 json_object（见 _request_chat_plain 注释）
@@ -345,7 +338,6 @@ async def call_llm(
                 "analysis": "",
                 "answer": content or "",
                 "actions": [],
-                "play_keyword": "",
             }
         return _normalize_response(payload, config["provider"], config["model"])
     except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -353,7 +345,6 @@ async def call_llm(
             "analysis": "Model call failed.",
             "answer": "LLM request failed, please check network/key/model settings.",
             "actions": [str(exc)],
-            "play_keyword": "",
             "provider": config["provider"],
             "model": config["model"],
         }
@@ -452,7 +443,6 @@ async def stream_llm(
             "analysis": "Missing API key.",
             "answer": "LLM_API_KEY is not configured.",
             "actions": ["Set backend/.env with LLM_API_KEY and retry."],
-            "play_keyword": "",
             "provider": config["provider"],
             "model": config["model"],
         }
@@ -567,7 +557,6 @@ async def stream_llm(
                     else "无法连接到 LLM 服务，请检查网络和 API 配置。"
                 ),
                 "actions": [str(exc)],
-                "play_keyword": "",
                 "provider": config["provider"],
                 "model": config["model"],
                 "stream_interrupted": connection_ok,
@@ -580,7 +569,6 @@ async def stream_llm(
                 "analysis": "Model call failed.",
                 "answer": "LLM 返回格式异常，请重试。",
                 "actions": [str(exc)],
-                "play_keyword": "",
                 "provider": config["provider"],
                 "model": config["model"],
                 "stream_interrupted": False,

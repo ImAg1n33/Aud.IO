@@ -171,7 +171,9 @@ class TestGenerateReply:
 
         reply, _ = await service.generate_reply("play something", {}, session_id=TEST_SID)
         assert "Sorry" in reply["answer"] or "抱歉" in reply["answer"] or "copyright" in reply.get("answer", "")
-        assert reply["play_keyword"] == ""
+        # T-N23-5：死字段已删除 —— 断言「不含该键」而非「等于空串」，
+        # 后者在字段被硬编码为 "" 时恒真，是假绿。
+        assert "play_keyword" not in reply
         assert "music" not in reply
 
 
@@ -579,6 +581,290 @@ class TestPhase1JsonContract:
 
         assert song is None
         assert search_calls == []
+
+
+class TestPlayKeywordRemoval:
+    """RFC-019 / N23 —— `play_keyword` 死字段已从 Reply 契约中删除。
+
+    保留的两处（Prompt 契约层 `prompts.py`、Phase-1 解析层 `_phase1_prefetch`）
+    不在本类覆盖范围内；本类只锁定「Reply 层绝不再吐出该键」，其中
+    T-N23-6 是 N1 的保护测试，防止本次清理误伤 Phase-1。
+    """
+
+    @pytest.fixture
+    def llm_env(self, tmp_path, monkeypatch):
+        """重定向 LLM 客户端的数据目录并固定 base_url/model，避免外网与真实落盘。"""
+        monkeypatch.setattr(settings, "aud_io_data_dir", str(tmp_path))
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "llm_base_url", "http://llm.test/v1")
+        monkeypatch.setattr(settings, "llm_model", "test-model")
+        monkeypatch.setattr(settings, "llm_disable_thinking", False)
+        return settings
+
+    # ------------------------------------------------------------------
+    # T-N23-1 —— _normalize_response 不再生成该键
+    # ------------------------------------------------------------------
+    def test_normalize_response_omits_play_keyword(self) -> None:
+        from backend.agent.llm_client import _normalize_response
+
+        # 输入里即使带着该键，也必须被拒之门外（否则等于「换个名字继续传播」）
+        out = _normalize_response(
+            {
+                "analysis": "a",
+                "answer": "b",
+                "actions": [{"tool": "search_music", "keyword": "x"}],
+                "play_keyword": "Artist SongTitle",
+            },
+            "test-provider",
+            "test-model",
+        )
+
+        assert "play_keyword" not in out
+        # 其余契约字段必须完好无损
+        assert out["analysis"] == "a"
+        assert out["answer"] == "b"
+        assert out["actions"] == [{"tool": "search_music", "keyword": "x"}]
+        assert out["provider"] == "test-provider"
+        assert out["model"] == "test-model"
+
+    # ------------------------------------------------------------------
+    # T-N23-2 —— call_llm 四个分支均不含该键
+    # ------------------------------------------------------------------
+    @pytest.mark.asyncio
+    async def test_call_llm_no_api_key_branch_omits_play_keyword(
+        self, llm_env, monkeypatch,
+    ) -> None:
+        from backend.agent.llm_client import call_llm
+
+        monkeypatch.setattr(settings, "llm_api_key", "")
+        monkeypatch.setattr(settings, "openai_api_key", "")
+        monkeypatch.setattr(settings, "deepseek_api_key", "")
+
+        reply = await call_llm("sys", "user")
+
+        assert "play_keyword" not in reply
+        assert reply["analysis"] == "Missing API key."
+
+    @pytest.mark.asyncio
+    async def test_call_llm_tools_branch_omits_play_keyword(
+        self, llm_env, monkeypatch,
+    ) -> None:
+        from backend.agent import llm_client
+        from backend.agent.llm_client import call_llm
+
+        monkeypatch.setattr(settings, "llm_api_key", "test-key")
+
+        async def fake_with_tools(config, messages, temperature, tools, **kwargs):
+            return "好的", [
+                {"function": {"name": "search_music", "arguments": '{"keyword": "x"}'}},
+            ]
+
+        monkeypatch.setattr(llm_client, "_request_chat_with_tools", fake_with_tools)
+
+        reply = await call_llm("sys", "user", tools=[{"type": "function"}])
+
+        assert "play_keyword" not in reply
+        assert reply["actions"] == [{"tool": "search_music", "keyword": "x"}]
+
+    @pytest.mark.asyncio
+    async def test_call_llm_plain_branch_omits_play_keyword(
+        self, llm_env, monkeypatch,
+    ) -> None:
+        from backend.agent import llm_client
+        from backend.agent.llm_client import call_llm
+
+        monkeypatch.setattr(settings, "llm_api_key", "test-key")
+
+        async def fake_plain(config, messages, temperature, timeout=30.0):
+            return "纯文本回答"
+
+        monkeypatch.setattr(llm_client, "_request_chat_plain", fake_plain)
+
+        reply = await call_llm("sys", "user")
+
+        assert "play_keyword" not in reply
+        assert reply["answer"] == "纯文本回答"
+        assert reply["actions"] == []
+
+    @pytest.mark.asyncio
+    async def test_call_llm_exception_branch_omits_play_keyword(
+        self, llm_env, monkeypatch,
+    ) -> None:
+        import httpx
+
+        from backend.agent import llm_client
+        from backend.agent.llm_client import call_llm
+
+        monkeypatch.setattr(settings, "llm_api_key", "test-key")
+
+        async def boom(config, messages, temperature, timeout=30.0):
+            raise httpx.ConnectError("network down")
+
+        monkeypatch.setattr(llm_client, "_request_chat_plain", boom)
+
+        reply = await call_llm("sys", "user")
+
+        assert "play_keyword" not in reply
+        assert reply["analysis"] == "Model call failed."
+
+    # ------------------------------------------------------------------
+    # T-N23-3 —— stream_llm 最终 dict 不含该键（正常流 + 连接失败两条路径）
+    # ------------------------------------------------------------------
+    @pytest.mark.asyncio
+    async def test_stream_llm_omits_play_keyword_on_success(
+        self, llm_env, monkeypatch,
+    ) -> None:
+        import httpx
+
+        from backend.agent.llm_client import stream_llm
+
+        monkeypatch.setattr(settings, "llm_api_key", "test-key")
+
+        # 不塞 [DONE] 哨兵：让 aiter_lines 自然耗尽，避免提前 break 留下
+        # 未关闭的异步生成器（会污染测试输出的 RuntimeWarning）
+        sse = (
+            'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+            'data: {"choices":[{"delta":{}}]}\n\n'
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                text=sse,
+                headers={"content-type": "text/event-stream"},
+            )
+
+        real_client = httpx.AsyncClient
+
+        def factory(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+        chunks: list = []
+        async for item in stream_llm("sys", "user"):
+            chunks.append(item)
+
+        tokens = [c for c in chunks if isinstance(c, str)]
+        finals = [c for c in chunks if isinstance(c, dict)]
+
+        assert tokens == ["Hello"]
+        assert len(finals) == 1
+        assert "play_keyword" not in finals[0]
+        assert finals[0]["answer"] == "Hello"
+        assert finals[0]["stream_interrupted"] is False
+
+    @pytest.mark.asyncio
+    async def test_stream_llm_omits_play_keyword_on_connection_error(
+        self, llm_env, monkeypatch,
+    ) -> None:
+        import httpx
+
+        from backend.agent.llm_client import stream_llm
+
+        monkeypatch.setattr(settings, "llm_api_key", "test-key")
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args) -> bool:
+                return False
+
+            def stream(self, *args, **kwargs):
+                raise httpx.ConnectError("cannot connect")
+
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        finals: list = []
+        async for item in stream_llm("sys", "user", max_retries=0):
+            if isinstance(item, dict):
+                finals.append(item)
+
+        assert len(finals) == 1
+        assert "play_keyword" not in finals[0]
+        assert finals[0]["retries_exhausted"] is True
+
+    # ------------------------------------------------------------------
+    # T-N23-4 —— 降级兜底对象不再注入该键，且剥离残留
+    # ------------------------------------------------------------------
+    def test_build_graceful_fallback_omits_play_keyword(self) -> None:
+        reply = {
+            "analysis": "ok",
+            "answer": "playing",
+            "actions": [
+                {"tool": "search_music", "keyword": "x"},
+                {"tool": "get_music_url", "song_id": "1"},
+            ],
+            "music": {"song_id": "1"},
+            "play_keyword": "Artist SongTitle",  # 模拟 mock / 历史残留
+            "provider": "test",
+            "model": "test",
+        }
+
+        degraded = AssistantService._build_graceful_fallback(reply)
+
+        assert "play_keyword" not in degraded
+        assert "music" not in degraded
+        assert degraded["actions"] == []  # 音乐工具被清空
+        assert degraded["answer"] == degraded["say"]
+        # 入参不被就地修改
+        assert reply["play_keyword"] == "Artist SongTitle"
+
+    # ------------------------------------------------------------------
+    # T-N23-6 🔒 —— 保护 N1：Reply 层删字段不得影响 Phase-1 的 JSON 取值
+    # ------------------------------------------------------------------
+    @pytest.mark.asyncio
+    async def test_phase1_prefetch_still_extracts_keyword_after_removal(
+        self, service, monkeypatch,
+    ) -> None:
+        """HTTP 返回含 play_keyword 的 JSON → _phase1_prefetch 仍返回非 None。
+
+        这条测试跨过 Reply 层：Phase-1 走 request_json_object →
+        _request_chat_json → _extract_json，与 _normalize_response 无关。
+        若有人把 `_phase1_prefetch` 改回 call_llm，本测试立刻变红。
+        """
+        monkeypatch.setattr(settings, "llm_api_key", "test-key")
+        captured = TestPhase1JsonContract._install_chat_transport(
+            monkeypatch,
+            '{"analysis":"点歌","answer":"","actions":[],'
+            '"play_keyword":"陈奕迅 富士山下"}',
+        )
+
+        searched: list[str] = []
+
+        async def fake_search(keyword: str):
+            searched.append(keyword)
+            return {
+                "id": "999", "name": "富士山下", "artist": "陈奕迅",
+                "cover_url": "", "album": "", "duration_ms": 1,
+            }
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return f"http://example.com/{song_id}.mp3"
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.search_first_song", fake_search,
+        )
+        monkeypatch.setattr(
+            "backend.services.assistant_service.get_song_mp3_url", fake_mp3,
+        )
+
+        song = await service._phase1_prefetch("来首富士山下", TEST_SID, {})
+
+        assert song is not None, (
+            "删除 play_keyword 后 Phase-1 取词链路必须完好（N1 回归）：返回 None "
+            "说明取值改走了 call_llm（其非工具分支只有自然语言，没有关键词）"
+        )
+        assert song["requested_keyword"] == "陈奕迅 富士山下"
+        assert song["song_id"] == "999"
+        assert searched == ["陈奕迅 富士山下"]
+        # 请求体仍是 JSON 模式 —— 与 Reply 层的 _normalize_response 无交集
+        assert captured["body"]["response_format"] == {"type": "json_object"}
 
 
 class TestTTSIntegration:

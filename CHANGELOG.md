@@ -26,6 +26,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   （AnalyserNode）、字体自托管（Doto/Space Grotesk/Space Mono woff2，
   运行时零外网请求）、主题防闪（内联脚本）、focus-visible / aria /
   prefers-reduced-motion、空态示例一键发送、消息流自动跟随（上滚不打扰）
+- **CI 前端测试 job + `npm test` 入口**：`tests/frontend/*.mjs` 共 33 个
+  Node 用例此前**从未在 CI 执行**（`.github/workflows/ci.yml` 只有 `test`
+  一个 job，全文件不含 node）。新增 `frontend-tests` job（`setup-node@v4`，
+  node 20，`node --test tests/frontend/*.mjs`，零 npm 依赖无需 install），
+  并在 `frontend/package.json` 补 `"test": "node --test ../tests/frontend/*.mjs"`
+  —— 此前 `npm test` 不可用，贡献者无从跑前端测试
 
 ### Changed
 - **前端视觉精修（设计层，零逻辑变更）**：环境点阵底纹 + 播放态微光描边；
@@ -68,6 +74,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   （不 mock 函数返回值），断言 `response_format={"type":"json_object"}`、
   `/chat/completions`、提取出的 `requested_keyword` 与搜索结果；已实测
   红→绿（回退到 HEAD 版本时精确失败于 `assert song is not None`）
+
+### Removed
+- **`play_keyword` 死字段**：`call_llm` / `stream_llm` / `_normalize_response`
+  返回值中的 `play_keyword` 恒为空串，且（Phase-1 改走 `request_json_object`
+  后）已无任何生产消费方 —— 保留一个「永远返回空串但看起来正常」的字段是最坏
+  选择，下一个调用方会立刻再踩同样的坑，故删除。**保留** Prompt 契约层
+  （`prompts.py` 仍要求 LLM 输出该字段）与 Phase-1 解析层
+  （`_phase1_prefetch` 的 `decision.get("play_keyword")`）；**删除** Reply 契约层
+  三处与降级对象层的注入（`_build_graceful_fallback` 改为 `pop`，顺带剥离残留）。
+  前端零引用（仅调 `/respond/stream`）故无兼容负担，`/respond` 响应体该字段同步
+  移除并更新 `docs/api.md`。新增 6 条测试，其中 T-N23-6 为 N1 保护测试
+  （httpx 传输层 mock 返回含该字段的 JSON，断言 `_phase1_prefetch` 仍能取词），
+  并已实测红→绿（临时把 `_phase1_prefetch` 改回 `call_llm` 时精确失败）
+
 ## [0.7.0] — 2026-09-10
 
 ### Added

@@ -107,7 +107,7 @@ Repository pattern (RFC-008) — Facade + repositories + helpers:
 ```
 1. Intent = MUSIC_PLAY
 2. SSE "searching" status → frontend shows a structured scanning state
-3. Phase 1: call_llm(PHASE1_DECISION_SYSTEM) → extract play_keyword
+3. Phase 1: request_json_object(PHASE1_DECISION_SYSTEM) → extract play_keyword
 4. Scored search (cloudsearch candidates → cover/original/artist/popularity scoring)
    → get_song_mp3_url(id); disliked artist check
 5. SSE "found" status + "music" event → frontend starts playback

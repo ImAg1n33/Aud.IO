@@ -1,4 +1,8 @@
 import asyncio
+import json
+import logging
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import BackgroundTasks
@@ -177,13 +181,198 @@ class TestGenerateReply:
         assert "music" not in reply
 
 
+class RecordingMemoryManager(StubMemoryManager):
+    """记录 async_update_profile 的入参，用于断言 summaries 真正抵达 Observer。
+
+    N22 的教训：只断言「注册了哪个函数」的测试毫无价值 —— 摘要恒为空也能绿。
+    这里改为记录真实入参，让功能是否生效变成可断言的事实。
+    """
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.update_calls: list[dict[str, Any]] = []
+        self.error = error
+
+    async def async_update_profile(
+        self, user_input: str, assistant_reply: str, summaries=None,
+    ) -> dict[str, Any]:
+        self.update_calls.append({
+            "user_input": user_input,
+            "assistant_reply": assistant_reply,
+            "summaries": summaries,
+        })
+        if self.error is not None:
+            raise self.error
+        return {"ok": True}
+
+
+def _install_recording_manager(
+    service: AssistantService, error: Exception | None = None,
+) -> RecordingMemoryManager:
+    """把记录型 MemoryManager 注入装配好的 session context。"""
+    recorder = RecordingMemoryManager(error=error)
+    service.session_manager.get_or_create(TEST_SID).memory_manager = recorder
+    return recorder
+
+
+def _trace_records(tmp_path) -> list[dict[str, Any]]:
+    """读取本次测试写入的会话 trace 记录（conversations.jsonl）。"""
+    log = tmp_path / "conversations.jsonl"
+    if not log.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 class TestScheduleProfileUpdate:
+    """后台画像更新调度 —— N22：摘要必须在协程里 await 后才会流到 Observer。"""
+
     def test_registers_background_task(self, service) -> None:
         bg = BackgroundTasks()
         service.schedule_profile_update(bg, "hello", {"answer": "ok"}, session_id=TEST_SID)
         assert len(bg.tasks) == 1
         task = bg.tasks[0]
-        assert task.func.__name__ == "async_update_profile"
+        assert task.func.__name__ == "_update_profile_with_summaries"
+
+    @pytest.mark.asyncio
+    async def test_summaries_reach_observer_payload(
+        self, service, monkeypatch
+    ) -> None:
+        """T-N22-1：跨会话整合真的生效 —— summaries 非空且按序到达。
+
+        这条是主验收之一：回退成同步 for 迭代时 summaries 恒为 []，必然红。
+        """
+        rows = [
+            {"summary_text": "摘要A"},
+            {"summary_text": "  摘要B  "},
+            {"summary_text": "   "},
+            {"summary_text": None},
+        ]
+        monkeypatch.setattr(
+            service.episodic_memory,
+            "query_recent_summaries",
+            AsyncMock(return_value=rows),
+        )
+        recorder = _install_recording_manager(service)
+
+        bg = BackgroundTasks()
+        service.schedule_profile_update(
+            bg, "我最近在听爵士", {"answer": "好的"}, session_id=TEST_SID,
+        )
+        await bg()  # Starlette 的 BackgroundTasks 自身可 await —— 真跑后台任务
+
+        assert len(recorder.update_calls) == 1
+        assert recorder.update_calls[0]["user_input"] == "我最近在听爵士"
+        assert json.loads(recorder.update_calls[0]["assistant_reply"]) == {"answer": "好的"}
+        assert recorder.update_calls[0]["summaries"] == ["摘要A", "摘要B"]
+
+    @pytest.mark.asyncio
+    async def test_summary_read_failure_degrades_but_stays_visible(
+        self, service, monkeypatch, caplog, tmp_path
+    ) -> None:
+        """T-N22-2：摘要读取失败 → 画像仍更新（收到 []），且失败可见。"""
+        monkeypatch.setattr(
+            service.episodic_memory,
+            "query_recent_summaries",
+            AsyncMock(side_effect=RuntimeError("database is locked")),
+        )
+        recorder = _install_recording_manager(service)
+
+        bg = BackgroundTasks()
+        with caplog.at_level(logging.WARNING):
+            service.schedule_profile_update(
+                bg, "hi", {"answer": "ok"}, session_id=TEST_SID,
+            )
+            await bg()
+
+        assert len(recorder.update_calls) == 1
+        assert recorder.update_calls[0]["summaries"] == []
+        warnings_text = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any("最近摘要读取失败" in m for m in warnings_text)
+        assert "bg:profile_summaries" in [r["path"] for r in _trace_records(tmp_path)]
+
+    @pytest.mark.asyncio
+    async def test_profile_update_failure_is_visible(
+        self, service, monkeypatch, caplog, tmp_path
+    ) -> None:
+        """T-N22-3：画像更新本身抛异常 → 有 WARNING + trace，且不向 ASGI 层抛。"""
+        monkeypatch.setattr(
+            service.episodic_memory,
+            "query_recent_summaries",
+            AsyncMock(return_value=[{"summary_text": "摘要A"}]),
+        )
+        recorder = _install_recording_manager(
+            service, error=ValueError("observer model down"),
+        )
+
+        bg = BackgroundTasks()
+        with caplog.at_level(logging.WARNING):
+            service.schedule_profile_update(
+                bg, "hi", {"answer": "ok"}, session_id=TEST_SID,
+            )
+            await bg()  # 后台任务异常不得逃逸到响应链路
+
+        assert len(recorder.update_calls) == 1
+        warnings_text = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any("画像更新失败" in m for m in warnings_text)
+        assert "bg:profile_update" in [r["path"] for r in _trace_records(tmp_path)]
+
+    @pytest.mark.asyncio
+    async def test_summary_query_awaited_exactly_once(
+        self, service, monkeypatch
+    ) -> None:
+        """T-N22-4：确定性判据 —— 摘要查询被 await 恰好一次（不依赖 GC 时机）。
+
+        调度阶段不许 await（薄调度，不阻塞响应），后台任务执行时才 await。
+        回退成 ``for item in self.episodic_memory.query_recent_summaries(...)``
+        时 await_count 恒为 0，此断言必然红 —— 不依赖 RuntimeWarning 的 GC 时机。
+        """
+        query_mock = AsyncMock(return_value=[{"summary_text": "摘要A"}])
+        monkeypatch.setattr(
+            service.episodic_memory, "query_recent_summaries", query_mock,
+        )
+        _install_recording_manager(service)
+
+        bg = BackgroundTasks()
+        service.schedule_profile_update(bg, "hi", {"answer": "ok"}, session_id=TEST_SID)
+        assert query_mock.await_count == 0
+
+        await bg()
+
+        assert query_mock.await_count == 1
+        assert query_mock.await_args.args[0] == TEST_SID
+        assert query_mock.await_args.kwargs["limit"] == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_memory_manager_does_not_crash(
+        self, service, monkeypatch, caplog, tmp_path
+    ) -> None:
+        """守卫：session context 未注入 MemoryManager 时后台任务不得炸掉。"""
+        monkeypatch.setattr(
+            service.episodic_memory,
+            "query_recent_summaries",
+            AsyncMock(return_value=[]),
+        )
+        service.session_manager.get_or_create(TEST_SID).memory_manager = None
+
+        bg = BackgroundTasks()
+        with caplog.at_level(logging.WARNING):
+            service.schedule_profile_update(
+                bg, "hi", {"answer": "ok"}, session_id=TEST_SID,
+            )
+            await bg()
+
+        warnings_text = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any("memory_manager 未初始化" in m for m in warnings_text)
+        assert "bg:profile_update" in [r["path"] for r in _trace_records(tmp_path)]
 
 
 class TestBuildToolSchemas:

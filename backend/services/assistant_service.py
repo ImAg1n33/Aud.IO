@@ -1090,25 +1090,89 @@ class AssistantService:
         final_reply: dict[str, Any],
         session_id: str | None = None,
     ) -> None:
+        """调度后台画像更新（薄调度，不阻塞响应）。
+
+        只做「取 session + 注册后台任务」，真正的异步取数在
+        :meth:`_update_profile_with_summaries` 内完成 —— 因为摘要查询
+        本身是协程，必须在 async 上下文里 await。
+        """
         sid = self._resolve_session(session_id)
         ctx = self.session_manager.get_or_create(sid)
 
+        background_tasks.add_task(
+            self._update_profile_with_summaries,
+            sid,
+            user_input,
+            json.dumps(final_reply, ensure_ascii=False),
+            ctx,
+        )
+
+    async def _update_profile_with_summaries(
+        self,
+        sid: str,
+        user_input: str,
+        final_reply_json: str,
+        ctx: Any,
+    ) -> None:
+        """后台画像更新：先取最近 Reflection 摘要（跨会话整合），再更新画像。
+
+        RFC-019 / N22：原先在同步上下文里直接 ``for`` 迭代 async 的
+        ``query_recent_summaries``，必然抛 ``TypeError: 'coroutine' object is
+        not iterable`` 且被裸 ``except Exception: pass`` 吞掉，导致 ``summaries``
+        恒为空 —— v0.6 宣称的「画像跨会话整合」从未生效。此处把取数挪进协程内
+        ``await``，并在失败时留下 WARNING + trace（能看见失败，但不阻断画像更新）。
+
+        设计取舍：
+        - 不重试：后台任务失败即降级，靠日志与 trace 暴露问题（不自愈）。
+        - 不向 ASGI 层抛异常：画像更新是旁路能力，绝不影响已经发给用户的响应。
+        """
         # 跨会话整合：Observer 输入带上最近 Reflection 摘要（防重复/防稀释）
         summaries: list[str] = []
         try:
-            for item in self.episodic_memory.query_recent_summaries(sid, limit=2):
-                text = str(item.get("summary_text") or "").strip()
-                if text:
-                    summaries.append(text)
-        except Exception:
-            pass  # 摘要缺失不阻断画像更新
+            rows = await self.episodic_memory.query_recent_summaries(sid, limit=2)
+            summaries = [
+                text
+                for text in (
+                    str(r.get("summary_text") or "").strip()
+                    for r in (rows or [])
+                    if isinstance(r, dict)
+                )
+                if text
+            ]
+        except Exception as exc:
+            # 摘要缺失不阻断画像更新（保留原意图），但绝不裸吞 ——
+            # RFC-019 §0.4 总纲 1：静默失效必须先「可见」
+            logger.warning(
+                "画像更新：最近摘要读取失败，降级为空 session=%s type=%s",
+                sid, type(exc).__name__, exc_info=True,
+            )
+            self._trace(
+                sid, "", None, "bg:profile_summaries", time.monotonic(),
+                error=f"{type(exc).__name__}: {str(exc)}"[:200],
+            )
 
-        background_tasks.add_task(
-            ctx.memory_manager.async_update_profile,
-            user_input,
-            json.dumps(final_reply, ensure_ascii=False),
-            summaries,
-        )
+        memory_manager = getattr(ctx, "memory_manager", None)
+        if memory_manager is None:
+            logger.warning("画像更新跳过：memory_manager 未初始化 session=%s", sid)
+            self._trace(
+                sid, "", None, "bg:profile_update", time.monotonic(),
+                error="memory_manager is None",
+            )
+            return
+
+        try:
+            await memory_manager.async_update_profile(
+                user_input, final_reply_json, summaries,
+            )
+        except Exception as exc:
+            logger.warning(
+                "画像更新失败（不影响对话）session=%s type=%s",
+                sid, type(exc).__name__, exc_info=True,
+            )
+            self._trace(
+                sid, "", None, "bg:profile_update", time.monotonic(),
+                error=f"{type(exc).__name__}: {str(exc)}"[:200],
+            )
 
     # ================================================================
     # Reflection（v5）—— 每 N 轮把对话压成跨会话摘要

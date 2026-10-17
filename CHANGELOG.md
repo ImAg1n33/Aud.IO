@@ -34,6 +34,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   —— 此前 `npm test` 不可用，贡献者无从跑前端测试
 
 ### Changed
+- **pytest 静默协程泄漏护栏**：`pytest.ini` 新增
+  `filterwarnings = error::RuntimeWarning` +
+  `error::pytest.PytestUnraisableExceptionWarning`。**必须两条**：`coroutine ...
+  was never awaited` 的 warning 在协程被 GC 时发出，发生在测试上下文之外，被
+  pytest 包装成 `PytestUnraisableExceptionWarning` —— 只写 `error::RuntimeWarning`
+  实测一条都拦不住（N22 存在时单 flag 新增失败 **+0**，双 flag **+1**，失败原文
+  为 `Exception ignored in: <coroutine object
+  EpisodicMemory.query_recent_summaries ...>`）。CI 从此拒绝「悄悄丢协程」。
 - **前端视觉精修（设计层，零逻辑变更）**：环境点阵底纹 + 播放态微光描边；
   频谱由条形改为 **Nothing 点阵列**（7 点/列，底部逐点点亮）；封面 72px +
   播放态描边 + 悬停微放大；进度条悬停增粗；全量按压反馈（active 微缩）；
@@ -87,6 +95,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   移除并更新 `docs/api.md`。新增 6 条测试，其中 T-N23-6 为 N1 保护测试
   （httpx 传输层 mock 返回含该字段的 JSON，断言 `_phase1_prefetch` 仍能取词），
   并已实测红→绿（临时把 `_phase1_prefetch` 改回 `call_llm` 时精确失败）
+- **画像跨会话整合从未生效（N22）**：`schedule_profile_update` 在**同步上下文**里
+  直接 `for` 迭代 `episodic_memory.query_recent_summaries(...)`，而后者是
+  `async def`（返回 coroutine）→ 必抛 `TypeError: 'coroutine' object is not
+  iterable`，又被紧邻的 `except Exception: pass` 裸吞 → `summaries` **恒为空**。
+  下游（`memory_manager.async_update_profile` → Observer prompt）全是通的，唯独
+  取数这一行是死的，v0.7 宣称的「画像跨会话整合」上线以来**一次都没生效**，
+  且 `/respond` 与 `/respond/stream` 两条主路径都受影响。
+  改为「**薄调度 + async wrapper**」：`schedule_profile_update` 只负责取 session
+  并把 `_update_profile_with_summaries` 注册到 `BackgroundTasks`（调用方签名与
+  行为不变），摘要查询移入 wrapper 内 `await`；异常不再裸吞，改为
+  `logger.warning(exc_info=True)` + `bg:profile_summaries` / `bg:profile_update`
+  类 trace（复用 `_trace` 既有 schema，不新增字段），保持「**能看见失败，不自愈**」
+  ——不加重试。新增 5 条测试（4 条 N22 必测 + 1 条 `memory_manager` 缺失守卫），
+  其中 **T-N22-1** 断言 `summaries` 真的到达
+  Observer 入参（真跑 `await bg()`，证明「功能生效」而非「不报错」），
+  **T-N22-4** 用 `AsyncMock.await_count == 1` 提供不依赖 GC 时机的确定性判据；
+  已实测红→绿（临时去掉 `await` 时 T-N22-1 / T-N22-4 精确失败）
 
 ## [0.7.0] — 2026-09-10
 

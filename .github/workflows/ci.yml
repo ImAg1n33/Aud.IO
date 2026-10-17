@@ -44,3 +44,21 @@ jobs:
 
       - name: Run secret scan
         run: python scripts/security_scan.py
+
+  frontend-tests:
+    # 前端逻辑层（reducer / sse-parser / queue / speech-queue / playlist）用 Node 内置
+    # node:test，零 npm 依赖，无需 install 与缓存。
+    # 必须先有本 job：否则 tests/frontend/*.mjs 从不执行，SSE 防劫持等回归保护为空。
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run frontend tests
+        # 必须显式 glob：文件名 test_*.mjs 不匹配 node --test 的目录默认模式
+        run: node --test tests/frontend/*.mjs

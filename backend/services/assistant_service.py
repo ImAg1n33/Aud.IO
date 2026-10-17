@@ -25,7 +25,7 @@ from backend.agent.context_assembler import (
     UserPreferenceProvider,
 )
 from backend.agent.intent_classifier import Intent, IntentClassifier
-from backend.agent.llm_client import call_llm, stream_llm
+from backend.agent.llm_client import call_llm, request_json_object, stream_llm
 from backend.agent.memory_manager import MemoryManager
 from backend.agent.prompts import (
     GRACEFUL_FALLBACK_TEXT,
@@ -983,6 +983,10 @@ class AssistantService:
 
         Uses PHASE1_DECISION_SYSTEM (role="system") with minimal context
         (role="user") to disambiguate song-title vs emotion.
+
+        走 request_json_object（JSON 模式）而非 call_llm：call_llm 的非工具分支
+        硬编码 play_keyword=""（见 llm_client._request_chat_plain），返回值永远
+        拿不到关键词，会让本函数恒返回 None（N1）。
         """
         ctx = self.session_manager.get_or_create(sid)
         currently_playing = (metadata or {}).get("Currently Playing", "")
@@ -996,9 +1000,18 @@ class AssistantService:
             last_reply=last_reply,
         )
 
+        # request_json_object 失败时 raise（不像 call_llm 返回兜底 dict），
+        # 保持原有「Phase 1 失败即 None」的降级语义
         try:
-            decision = await call_llm(PHASE1_DECISION_SYSTEM, decision_user_prompt)
+            decision = await request_json_object(
+                [
+                    {"role": "system", "content": PHASE1_DECISION_SYSTEM},
+                    {"role": "user", "content": decision_user_prompt},
+                ],
+                temperature=0.1,
+            )
         except Exception:
+            logger.debug("Phase 1 decision call failed", exc_info=True)
             return None
 
         play_kw = (decision.get("play_keyword") or "").strip()

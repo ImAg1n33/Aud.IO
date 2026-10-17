@@ -55,6 +55,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Single-Pass 输出规则同步禁止会话中途重复问候（实测 1 问候 + 3 换歌无复读）
 - **本地即时切歌被延迟暂停**：`stopTrack()` 的 1.3s 淡出定时器未在
   `playTrack()` 清除，列表模式本地直放会被旧定时器暂停 → 播放时清理
+- **Phase-1 确定性兜底恒失效（N1）**：`_phase1_prefetch` 调用 `call_llm` 时未传
+  tools，命中 `_request_chat_plain` 分支里硬编码的 `play_keyword=""`
+  （`llm_client.py:348`），`_normalize_response` 亦只透传、不从文本解析 JSON
+  → `play_kw` 恒为空、本函数恒返回 `None`：Two-Pass 主路径整段不可达，
+  第 3 层容错（Phase-1 兜底）一并失效，且每次常规播放白烧一次 LLM 往返。
+  改为调用已有的 `request_json_object`（走 `_request_chat_json`，返回已解析
+  dict，失败仍由外层 try/except 兜为 `None`），**不动自然语言路径**——在
+  `call_llm` 的 plain 分支加 `_extract_json` 会让所有闲聊/天气回复因
+  `ValueError` 命中兜底、统一返回 "Model call failed."
+  补 `TestPhase1JsonContract` 契约测试：用 `httpx.MockTransport` 替换传输层
+  （不 mock 函数返回值），断言 `response_format={"type":"json_object"}`、
+  `/chat/completions`、提取出的 `requested_keyword` 与搜索结果；已实测
+  红→绿（回退到 HEAD 版本时精确失败于 `assert song is not None`）
 ## [0.7.0] — 2026-09-10
 
 ### Added

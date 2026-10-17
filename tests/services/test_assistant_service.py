@@ -340,7 +340,9 @@ class TestTwoPassStreaming:
     @pytest.mark.asyncio
     async def test_two_pass_sends_status_searching_then_found(self, service, monkeypatch) -> None:
         """Phase 1 success → status:searching → status:found → music → token → text → done."""
-        async def fake_decision(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_decision(messages, model=None, temperature=0.1):
+            assert messages[0]["role"] == "system"
+            assert messages[1]["role"] == "user"
             return {
                 "analysis": "ok", "answer": "", "actions": [],
                 "play_keyword": "Test Song",
@@ -361,7 +363,7 @@ class TestTwoPassStreaming:
             }
 
         monkeypatch.setattr(
-            "backend.services.assistant_service.call_llm", fake_decision,
+            "backend.services.assistant_service.request_json_object", fake_decision,
         )
         monkeypatch.setattr(
             "backend.services.assistant_service.search_first_song", fake_search,
@@ -395,7 +397,7 @@ class TestTwoPassStreaming:
     @pytest.mark.asyncio
     async def test_two_pass_falls_back_on_phase1_failure(self, service, monkeypatch) -> None:
         """When Phase 1 returns None, the pipeline falls through to Single-Pass."""
-        async def fake_decision(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_decision(messages, model=None, temperature=0.1):
             return {
                 "analysis": "ok", "answer": "", "actions": [],
                 "play_keyword": "",
@@ -409,7 +411,7 @@ class TestTwoPassStreaming:
             }
 
         monkeypatch.setattr(
-            "backend.services.assistant_service.call_llm", fake_decision,
+            "backend.services.assistant_service.request_json_object", fake_decision,
         )
         monkeypatch.setattr(
             "backend.services.assistant_service.stream_llm", fake_stream,
@@ -449,6 +451,134 @@ class TestTwoPassStreaming:
         # CHITCHAT should NOT have status events (no Two-Pass)
         assert "status" not in event_types
         assert "done" in event_types
+
+
+class TestPhase1JsonContract:
+    """Phase 1 契约测试（RFC-019 / N1）：mock 到 HTTP 传输层，验证 JSON 链路真能取词。
+
+    刻意 **不** mock 函数返回值 —— 只替换 httpx 传输层，因此断言的是
+    「请求构造 → JSON 解析 → play_keyword 提取」整条链路，
+    而不是「mock 替我填好了 play_keyword」。
+    """
+
+    SONG = {
+        "id": "186016",
+        "name": "晴天",
+        "artist": "周杰伦",
+        "cover_url": "http://example.com/qingtian.jpg",
+        "album": "叶惠美",
+        "duration_ms": 269000,
+    }
+
+    @staticmethod
+    def _install_chat_transport(monkeypatch, content: str) -> dict:
+        """把 httpx.AsyncClient 换成 MockTransport，返回可断言的请求捕获槽。"""
+        import json as _json
+
+        import httpx
+
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["body"] = _json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-contract",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+
+        real_client = httpx.AsyncClient
+
+        def factory(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", factory)
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_phase1_prefetch_extracts_keyword_from_json_response(
+        self, service, monkeypatch,
+    ) -> None:
+        """HTTP 返回 play_keyword → _phase1_prefetch 必须返回非 None（N1 回归防线）。"""
+        monkeypatch.setattr(settings, "llm_api_key", "test-key")
+        captured = self._install_chat_transport(
+            monkeypatch,
+            '{"analysis":"用户想听晴天","answer":"","actions":[],'
+            '"play_keyword":"周杰伦 晴天"}',
+        )
+
+        search_calls: list[str] = []
+
+        async def fake_search(keyword: str):
+            search_calls.append(keyword)
+            return dict(self.SONG)
+
+        async def fake_mp3(song_id: str, level: str = "standard"):
+            return f"http://example.com/{song_id}.mp3"
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.search_first_song", fake_search,
+        )
+        monkeypatch.setattr(
+            "backend.services.assistant_service.get_song_mp3_url", fake_mp3,
+        )
+
+        song = await service._phase1_prefetch("来首晴天", TEST_SID, {})
+
+        assert song is not None, (
+            "Phase 1 必须能从 JSON 响应里取出 play_keyword；返回 None 说明"
+            " 走的是自然语言分支（硬编码 play_keyword=''，N1）"
+        )
+        assert song["requested_keyword"] == "周杰伦 晴天"
+        assert song["song_id"] == "186016"
+        assert song["name"] == "晴天"
+        assert song["artist"] == "周杰伦"
+        assert song["mp3_url"] == "http://example.com/186016.mp3"
+        assert search_calls == ["周杰伦 晴天"]
+
+        # 请求体必须是 JSON 模式 —— 自然语言分支（_request_chat_plain）没有该字段
+        body = captured["body"]
+        assert body["response_format"] == {"type": "json_object"}
+        assert body["messages"][0]["role"] == "system"
+        assert body["messages"][1]["role"] == "user"
+        assert body["messages"][1]["content"].endswith("User: 来首晴天")
+        assert "/chat/completions" in captured["url"]
+
+    @pytest.mark.asyncio
+    async def test_phase1_prefetch_returns_none_without_keyword(
+        self, service, monkeypatch,
+    ) -> None:
+        """HTTP 返回无 play_keyword 的 JSON → _phase1_prefetch 返回 None 且不搜索。"""
+        monkeypatch.setattr(settings, "llm_api_key", "test-key")
+        self._install_chat_transport(
+            monkeypatch, '{"analysis":"不是点歌","answer":"","actions":[]}',
+        )
+
+        search_calls: list[str] = []
+
+        async def fake_search(keyword: str):
+            search_calls.append(keyword)
+            return dict(self.SONG)
+
+        monkeypatch.setattr(
+            "backend.services.assistant_service.search_first_song", fake_search,
+        )
+
+        song = await service._phase1_prefetch("今天天气怎么样", TEST_SID, {})
+
+        assert song is None
+        assert search_calls == []
 
 
 class TestTTSIntegration:
@@ -527,7 +657,7 @@ class TestTTSIntegration:
         from backend.agent.tts_provider import TTSProvider
         service.tts = TTSProvider()
 
-        async def fake_decision(system_prompt: str, user_prompt: str, model: str | None = None):
+        async def fake_decision(messages, model=None, temperature=0.1):
             return {
                 "analysis": "ok", "answer": "", "actions": [],
                 "play_keyword": "Test Song",
@@ -549,7 +679,7 @@ class TestTTSIntegration:
             }
 
         monkeypatch.setattr(
-            "backend.services.assistant_service.call_llm", fake_decision,
+            "backend.services.assistant_service.request_json_object", fake_decision,
         )
         monkeypatch.setattr(
             "backend.services.assistant_service.search_first_song", fake_search,
@@ -791,7 +921,7 @@ class TestPhase1DeterministicFallback:
 
         monkeypatch.setattr(IntentClassifier, "classify_async", fake_classify)
 
-        calls = {"stream": 0, "llm": 0}
+        calls = {"stream": 0, "llm": 0, "json": 0}
 
         async def fake_stream(system_prompt: str, user_prompt: str, **kw):
             calls["stream"] += 1
@@ -806,12 +936,14 @@ class TestPhase1DeterministicFallback:
                        "actions": [], "play_keyword": "", "provider": "t", "model": "m"}
 
         async def fake_call_llm(system_prompt: str, user_prompt: str, model: str | None = None, **kw):
+            """严格重试：仍拒绝调工具。"""
             calls["llm"] += 1
-            if calls["llm"] == 1:
-                # 严格重试：仍拒绝调工具
-                return {"analysis": "", "answer": "", "actions": [],
-                        "play_keyword": "", "provider": "t", "model": "m"}
-            # Phase 1 决策：给出 play_keyword
+            return {"analysis": "", "answer": "", "actions": [],
+                    "play_keyword": "", "provider": "t", "model": "m"}
+
+        async def fake_json_decision(messages, model=None, temperature=0.1):
+            """Phase 1 决策（JSON 路径）：给出 play_keyword。"""
+            calls["json"] += 1
             return {"analysis": "", "answer": "", "actions": [],
                     "play_keyword": "Frank Ocean Pink + White", "provider": "t", "model": "m"}
 
@@ -823,6 +955,9 @@ class TestPhase1DeterministicFallback:
 
         monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
         monkeypatch.setattr("backend.services.assistant_service.call_llm", fake_call_llm)
+        monkeypatch.setattr(
+            "backend.services.assistant_service.request_json_object", fake_json_decision,
+        )
         monkeypatch.setattr("backend.services.assistant_service.search_first_song", fake_search)
         monkeypatch.setattr("backend.services.assistant_service.get_song_mp3_url", fake_mp3)
 
@@ -833,8 +968,9 @@ class TestPhase1DeterministicFallback:
             if sse.startswith("event: "):
                 events.append(sse)
 
-        # 严格重试 + Phase 1 决策各一次 LLM 调用
-        assert calls["llm"] == 2
+        # 严格重试（call_llm）+ Phase 1 决策（request_json_object）各一次
+        assert calls["llm"] == 1
+        assert calls["json"] == 1
         # 最终出歌（Phase 1 确定性兜底），虚构失败文本被 Phase 2 台词替换
         assert any("event: music" in e for e in events)
         done_event = [e for e in events if "event: done" in e][0]
@@ -1138,8 +1274,16 @@ class TestPreviousRequest:
             return {"analysis": "", "answer": "", "actions": [],
                     "play_keyword": "", "provider": "t", "model": "m"}
 
+        async def fake_json_decision(messages, model=None, temperature=0.1):
+            # Phase 1 未识别出关键词 → None → 继续走单遍
+            return {"analysis": "", "answer": "", "actions": [],
+                    "play_keyword": "", "provider": "t", "model": "m"}
+
         monkeypatch.setattr("backend.services.assistant_service.stream_llm", fake_stream)
         monkeypatch.setattr("backend.services.assistant_service.call_llm", fake_call_llm)
+        monkeypatch.setattr(
+            "backend.services.assistant_service.request_json_object", fake_json_decision,
+        )
 
         events = []
         async for sse in service.generate_reply_stream(

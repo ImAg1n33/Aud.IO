@@ -29,9 +29,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **CI 前端测试 job + `npm test` 入口**：`tests/frontend/*.mjs` 共 33 个
   Node 用例此前**从未在 CI 执行**（`.github/workflows/ci.yml` 只有 `test`
   一个 job，全文件不含 node）。新增 `frontend-tests` job（`setup-node@v4`，
-  node 20，`node --test tests/frontend/*.mjs`，零 npm 依赖无需 install），
+  node 20，`npm install --omit=dev` 后跑 `node --test tests/frontend/*.mjs`），
   并在 `frontend/package.json` 补 `"test": "node --test ../tests/frontend/*.mjs"`
-  —— 此前 `npm test` 不可用，贡献者无从跑前端测试
+  —— 此前 `npm test` 不可用，贡献者无从跑前端测试。
+  **必须 install**：测试文件本身零依赖，但它们 import 的被测源码
+  （`stores/chat.js` / `player.js` / `playlist.js`）`import { defineStore }
+  from 'pinia'`。首版漏了这步，job 1 秒内 ModuleNotFound 失败，本地却全绿
+  （本机 `frontend/node_modules` 有 pinia）——「本地绿 / CI 红」的典型陷阱
 
 ### Changed
 - **pytest 静默协程泄漏护栏**：`pytest.ini` 新增

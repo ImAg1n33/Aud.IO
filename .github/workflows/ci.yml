@@ -47,8 +47,12 @@ jobs:
 
   frontend-tests:
     # 前端逻辑层（reducer / sse-parser / queue / speech-queue / playlist）用 Node 内置
-    # node:test，零 npm 依赖，无需 install 与缓存。
-    # 必须先有本 job：否则 tests/frontend/*.mjs 从不执行，SSE 防劫持等回归保护为空。
+    # node:test。必须先有本 job：否则 tests/frontend/*.mjs 从不执行，SSE 防劫持等
+    # 回归保护为空。
+    #
+    # 必须 npm install：测试文件本身零依赖，但它们 import 的被测源码
+    # （stores/chat.js、player.js、playlist.js）import pinia —— 不装会
+    # ModuleNotFound，且失败只用 1 秒，容易被误判成"测试挂了"。
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -58,6 +62,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+
+      - name: Install frontend runtime deps
+        run: npm install --omit=dev
+        working-directory: frontend
 
       - name: Run frontend tests
         # 必须显式 glob：文件名 test_*.mjs 不匹配 node --test 的目录默认模式

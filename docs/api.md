@@ -243,3 +243,21 @@ data: Put on some Miles Davis...
 event: done
 data: {"analysis":"...","answer":"Put on some Miles Davis...","music":{...}}
 ```
+
+**Wire Format Contract (INV-SSE)**: a payload containing newlines is emitted as
+**one `data:` line per line**, so a single frame may carry multiple `data:` lines.
+Clients MUST join them with `\n` (per the SSE spec) to reconstruct the payload:
+
+```
+event: text
+data: 第一段。
+data: 第二段。
+```
+
+The event type is **always decided by the server** and never by the payload —
+a payload can neither forge a frame boundary nor an `event:` line. This is
+enforced by the sequence tests in `tests/services/test_sse_contract.py`.
+
+`done` payloads are always a single-line `json.dumps(...)` string (the
+non-streaming `/respond` and `/respond/stream` handlers both parse it), so
+they never span multiple `data:` lines.

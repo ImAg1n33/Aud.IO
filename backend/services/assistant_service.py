@@ -1056,7 +1056,47 @@ class AssistantService:
 
     @staticmethod
     def _sse(event: str, data: str) -> str:
-        return f"event: {event}\ndata: {data}\n\n"
+        """SSE 帧编码 —— 唯一的线格式出口（RFC-019 §2.C，方案甲）。
+
+        载荷必须逐行加 ``data: `` 前缀，**不得**直接内插。裸内插会带来三类
+        协议完整性缺陷（N20），因为前端 ``sse-parser.js`` 以 ``\\n\\n`` 切帧、
+        只认 ``data: `` / ``event: `` 前缀行，其余行静默丢弃：
+
+        1. 丢字：载荷含单个 ``\\n`` 时，第二行起被整行丢弃；``text`` 分支是
+           全量覆盖（``last.text = data``）且 ``done`` 不回填 → 永久内容丢失。
+        2. 假帧边界：载荷含 ``\\n\\n`` 时凭空造出第二帧，前半截内容成孤立块。
+        3. 控制帧伪造：载荷含 ``\\nevent: music\\ndata: {...}`` 时事件类型被
+           改写，前端 ``JSON.parse`` 成功后调用 ``player.playTrack()``，
+           可驱动播放任意 URL。
+
+        本实现满足 INV-SSE（RFC-019 §2.C.6）：
+            - 除唯一帧尾 ``\\n\\n`` 外，正文中不存在 ``\\n\\n`` 子序列；
+            - 正文每一行都以 ``event: `` 或 ``data: `` 开头，无裸行。
+        因此事件类型恒由服务端唯一决定，与载荷内容完全无关。
+
+        细节与理由：
+            - ``\\r\\n`` 与裸 ``\\r`` 先归一为 ``\\n``：不归一则行分隔符逃过
+              拆分，``\\r`` 残留在 data 值里且同样导致后续内容丢行。
+            - 前缀是 ``"data: "``（**含尾空格**）：前端用
+              ``line.startsWith('data: ')`` 判定，漏掉空格整行会被丢弃。
+            - 空行安全：``"a\\n\\nb"`` → ``data: a`` / ``data: `` / ``data: b``，
+              三行都有前缀，不会提前断帧。
+            - 末行为空安全：``"abc\\n"`` → ``data: abc`` / ``data: `` + 帧尾，
+              解析器断帧前已收到该空行，``join('\\n')`` 还原为 ``abc\\n``，无损。
+
+        前端零改动：``sse-parser.js`` 的多行 data 还原（``join('\\n')``）本就是
+        SSE 规范行为且有测试背书，缺陷 100% 在产出端。
+
+        Args:
+            event: 事件类型，如 ``token`` / ``music`` / ``done``。
+            data: 任意文本载荷。JSON 载荷由调用方预先 ``json.dumps``。
+
+        Returns:
+            可直接写入 ``text/event-stream`` 响应体的完整帧字符串。
+        """
+        body = str(data).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        lines = "\n".join(f"data: {line}" for line in body)
+        return f"event: {event}\n{lines}\n\n"
 
     async def _maybe_yield_speech(
         self, answer_text: str, intent_str: str, is_music_play: bool = False,

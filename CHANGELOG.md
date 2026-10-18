@@ -112,6 +112,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Observer 入参（真跑 `await bg()`，证明「功能生效」而非「不报错」），
   **T-N22-4** 用 `AsyncMock.await_count == 1` 提供不依赖 GC 时机的确定性判据；
   已实测红→绿（临时去掉 `await` 时 T-N22-1 / T-N22-4 精确失败）
+- **SSE 载荷未序列化（N20，协议完整性缺陷）**：`_sse()` 用裸 f-string 把 LLM
+  原文直接内插进 `data:` 行，而前端 `sse-parser.js` 按 `\n\n` 切帧、只认
+  `data: ` / `event: ` 前缀行，其余行静默丢弃 → 三类缺陷：
+  1. **丢字**：载荷含单个 `\n` 时第二行起整行丢失；`text` 分支是全量覆盖
+     （`last.text = data`）且 `done` 不回填 → **答案永久残缺**，不是显示瑕疵；
+  2. **假帧边界**：载荷含 `\n\n` 时凭空造出第二帧，前半截成孤立块；
+  3. **控制帧伪造**：载荷含 `\nevent: music\ndata: {...}` 时事件类型被改写，
+     前端 `JSON.parse` 成功后调用 `player.playTrack()`，**可驱动播放任意 URL**。
+  改为**逐行加 `data: ` 前缀**（先把 `\r\n` 与裸 `\r` 归一为 `\n`），满足
+  不变量 **INV-SSE**：除唯一帧尾外正文不存在 `\n\n`，且每行均以 `event: ` 或
+  `data: ` 开头 → 载荷无法伪造帧边界，也无法伪造控制行，**事件类型恒由服务端
+  唯一决定**。**前端零改动**（多行 `data:` 还原本就是 SSE 规范行为）。
+  新增 `tests/services/test_sse_contract.py`（Python 侧，验证 `_sse` 真实字节流
+  的无损往返）与 `tests/frontend/test_sse_injection.mjs`（Node 侧，自带
+  `encodeSse`/`encodeSseLegacy` 双编码器，验证生产解析器在目标格式下不被劫持、
+  并复现旧实现下的攻击）；含 3 条**源码级静态断言**，拦「docstring 已更新、
+  函数体未更新」的半成品提交（该中间态在实施中真实出现过）。
+  已实测红→绿：修复前 Python 侧 18 红，修复后全绿；在独立 worktree 的未修复
+  HEAD 上静态断言精确变红
 
 ## [0.7.0] — 2026-09-10
 

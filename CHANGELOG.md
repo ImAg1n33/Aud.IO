@@ -37,6 +37,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   from 'pinia'`。首版漏了这步，job 1 秒内 ModuleNotFound 失败，本地却全绿
   （本机 `frontend/node_modules` 有 pinia）——「本地绿 / CI 红」的典型陷阱
 
+- **评估链路从「只出指标」升级为「真能红灯的门禁」**：此前 golden set、runner、
+  报告、CI artifact 一应俱全，但**没有任何一条路径能让质量下降变成红灯**
+  （`run_intent_eval.py` 的 `--fail-below` 默认 `None` 且 CI 从不传；
+  `run_retrieval_eval.py` **根本没有**这个参数；检索评测从未进过 CI）——
+  这与 N1/N22 是同一病根的两面：代码层静默失效让测试全绿，门禁层静默失效让 CI 全绿。
+  - `eval/run_retrieval_eval.py` 新增 `--fail-below`，判据用 **MRR 而非 recall@5**：
+    实测三种差异极大的嵌入配置（MiniLM / BGE / hybrid）的 recall@5 **完全相同
+    （81.8%）**，而 MRR 从 0.345 → 0.644（+87%）—— n=11 下 recall@5 粒度高达
+    9.1pp，用它设阈值等于用一把分辨率 9pp 的尺子去量 5pp 的变化。判据抽出为纯函数
+    `_exit_code_for_gate()`，可不下载模型单测。
+  - 新增 `.github/workflows/eval-retrieval.yml`（**weekly cron**，每周一 03:00 UTC
+    + `workflow_dispatch`）：BGE 首次运行需下载数百 MB，放进每次 push 会把「网络抖动」
+    与「检索质量变化」混为一谈；而检索质量本身低频变化，7 天延迟可接受。
+    阈值 `--fail-below 0.55`（BGE 实测 0.644，留约 2 次位次波动容错，且能拦住
+    「回退 MiniLM → 0.345」的灾难性回归）。**必须显式 `EMBEDDING_PROVIDER=fastembed`**：
+    `create_embedding_provider()` 默认分支是 `local`/MiniLM（MRR 0.345 < 0.55），
+    而 `backend/.env` 被 gitignore、CI 拿不到 → 不指定就会**每周恒红**，
+    噪声门禁比没有门禁更糟。
+  - 新增 `tests/eval/test_eval_gates.py`（11 条）：端到端 spawn 真实 eval 断言退出码
+    （阈值 0.99 → exit 1 且 stdout 含 `[FAIL]`；0.50 → exit 0）、门禁函数四组边界、
+    workflow 阈值防漂移、以及 **YAML 可解析性 + 关键 step 未丢失**。
+  - `requirements-dev.txt` 显式声明 `PyYAML==6.0.3`：**此前只是靠 chromadb 间接装上的
+    传递依赖**，而 YAML 校验测试依赖它。
+
 ### Changed
 - **pytest 静默协程泄漏护栏**：`pytest.ini` 新增
   `filterwarnings = error::RuntimeWarning` +
@@ -61,8 +85,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   （"那股子复古 funk 的劲儿就对了…稳。"）：定义语域基准（深夜电台音乐编辑）
   + BAD/GOOD 对照示例，新增俚语禁词（那股子/劲儿就对了/走起/带感/上头/拿捏…），
   禁止单字成句评价
+- **CI 意图评估接上阈值 `--fail-below 0.80`**：实测基线 85.0% (51/60)，0.80 留约
+  3 条容错。**刻意不设 0.85** —— 阈值等于基线会被 prompt 微调长期误伤，最终被人
+  为绕过。
+- **门禁自身也要有门禁**：`ci.yml` 新增极轻量冒烟
+  `python -m eval.run_retrieval_eval --help | grep -q -- "--fail-below"`，
+  确保 weekly 任务不会因为脚本接口漂移而静默失效。**只跑 `--help` 不算检查** ——
+  参数被删掉时它照样 exit 0，必须断言参数出现在输出里。
+- `Upload eval reports` 加 `if: always()`：门禁红了的时候，评估报告恰恰是区分
+  「阈值被删了」和「准确率真的掉了」的唯一证据。
 
 ### Fixed
+- **CI 因非法 YAML 整条停摆（本次改动引入、同批修复）**：新增 step 名写作
+  `- name: Smoke: retrieval eval gate interface intact`，未加引号的 plain scalar 里
+  含「冒号+空格」→ `yaml.safe_load` 抛 `ScannerError` → **GitHub 不报错，只是整个
+  workflow 一个 step 都不跑**，连改动前本就正常的 `Lint (ruff)` / `Run tests` /
+  `Run secret scan` 一起静默死掉。讽刺的是它由「防止静默失效」的那个 step 亲手造成。
+  已给 step 名加引号，并补 `TestWorkflowYamlValidity`（解析全部 workflow + 断言
+  test job 关键 step 仍在）—— 原防漂移用例是**纯文本断言，看不见 YAML 失效**，
+  事故当时 17 条测试依然全绿。
 - **AUTO 续播覆盖上一条消息**：`autoContinue` 的消息复用条件写成"非 streaming"
   （成功消息也被复用）→ 第三首会把第二首的歌曲卡片覆盖掉。收紧为
   **仅复用失败（error）的自动消息**做重试；成功消息永不复用（纯函数

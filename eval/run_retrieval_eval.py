@@ -12,8 +12,12 @@
     --embedding   local | api (默认 local)
     --output      Markdown 报告路径 (默认 eval/reports/retrieval-report.md)
     --keep-data   保留临时数据目录（调试用）
+    --fail-below  MRR 低于此值时退出码非 0（CI 门禁用）
 
 输出: 控制台逐查询命中 + Markdown 报告（recall@k、MRR、嵌入提供者）。
+
+门禁判据是 MRR 而不是 recall@k：n=11 时 recall@5 的粒度高达 9.1pp，三种
+差异极大的嵌入配置实测完全相同（81.8%），完全无区分力（详见 RFC-019 §2.E.2）。
 
 基线口径: 合成快照 + 人工标注期望命中，衡量 query_by_semantic 的召回质量。
 升级嵌入模型或检索策略后重跑本基准即可量化对比（如 BGE-m3 vs MiniLM）。
@@ -142,12 +146,28 @@ def _build_report(results: list[dict[str, Any]], summary: dict[str, Any], limit:
     return "\n".join(lines) + "\n"
 
 
+def _exit_code_for_gate(mrr: float, fail_below: float | None) -> int:
+    """门禁判据：低于阈值返回 1（CI 红灯）；未设阈值或达标返回 0。
+
+    判据用 MRR 而不是 recall@k：n=11 时 recall@5 粒度高达 9.1pp，
+    三种差异极大的嵌入配置实测完全相同（81.8%），完全无区分力
+    （详见 RFC-019 §2.E.2）。
+    """
+    if fail_below is not None and mrr < fail_below:
+        print(f"[FAIL] MRR {mrr:.3f} 低于阈值 {fail_below:.3f}")
+        return 1
+    return 0
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Aud.IO 记忆检索评估")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--embedding", choices=["local", "api"], default="local")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--keep-data", action="store_true")
+    parser.add_argument(
+        "--fail-below", type=float, default=None, help="MRR 低于此值时退出码非 0（CI 门禁用）"
+    )
     args = parser.parse_args()
 
     seeds, queries = load_golden()
@@ -161,7 +181,7 @@ async def main() -> int:
         f"({summary['hits']}/{summary['queries']}) | embedding: {summary['embedding']}"
     )
     print(f"报告已写入: {args.output}")
-    return 0
+    return _exit_code_for_gate(summary["mrr"], args.fail_below)
 
 
 if __name__ == "__main__":

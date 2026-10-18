@@ -45,3 +45,6 @@ eval/reports/
 
 # WorkBuddy (agent session artifacts — session memory, review reports, handoff notes)
 .workbuddy/
+
+# Agent skill 工作草稿（impeccable 等 Skill 产出的临时规范，非项目内容）
+.impeccable.md

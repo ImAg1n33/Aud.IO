@@ -1,0 +1,52 @@
+# 记忆检索评估门禁（weekly）—— 与 CI 分开的三个理由：
+#
+# 1) 为什么 weekly 而不是每次 push：BGE 模型首次运行要下载数百 MB，且依赖网络；
+#    每次 push 都跑会把「网络抖动」和「检索质量变化」混为一谈，产生误红。
+#    而检索质量本身是低频变化（换嵌入模型 / 改检索策略才会动），weekly 足够。
+#
+# 2) 为什么必须显式 EMBEDDING_PROVIDER=fastembed：
+#    create_embedding_provider() 的默认分支是 local → MiniLM，实测 MRR 仅 0.345，
+#    恒低于 0.55 阈值 —— 不指定就会每周恒红，门禁等于废掉。
+#
+# 3) 为什么阈值 0.55：fastembed(BGE) 实测 MRR 0.644，0.644−0.55=0.094，
+#    约等于 2 次位次波动的容错；同时能拦住「回退 MiniLM → 0.345」这类灾难性回归。
+#
+# 判据用 MRR 而非 recall@k：n=11 时 recall@5 粒度 9.1pp，三种差异极大的嵌入
+# 配置实测完全相同（81.8%），无区分力。
+
+name: Eval Retrieval
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # 每周一 03:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  retrieval-eval:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run retrieval eval (MRR gate, BGE)
+        env:
+          EMBEDDING_PROVIDER: fastembed   # 必须指定：默认 local(MiniLM) MRR=0.345 会恒红
+        run: python -m eval.run_retrieval_eval --fail-below 0.55 --output eval/reports/retrieval-report.md
+
+      - name: Upload retrieval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-eval-report
+          path: eval/reports/retrieval-report.md

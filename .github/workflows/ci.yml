@@ -33,10 +33,24 @@ jobs:
       - name: Run tests
         run: pytest
 
+      # 阈值 0.80 的依据：实测基线 85.0%(51/60)，留出约 3 条容错。
+      # 不设 0.85 是因为阈值等于基线会被 prompt 微调长期误伤 ——
+      # 噪声门禁比没有门禁更糟。
       - name: Run intent eval baseline (keyword mode, no LLM)
-        run: python -m eval.run_intent_eval --mode keyword --output eval/reports/intent-keyword-report.md
+        run: python -m eval.run_intent_eval --mode keyword --fail-below 0.80 --output eval/reports/intent-keyword-report.md
 
+      # ⚠️ step 名必须加引号：plain scalar 里出现「冒号+空格」会让整个 YAML
+      # 解析失败 —— 而 GitHub 对此不报错，只是**整个 workflow 一个 step 都不跑**
+      # （连 ruff / pytest / secret scan 一起静默死掉）。这正是本项目要消灭的失效型。
+      - name: "Smoke: retrieval eval gate interface intact"
+        # 门禁自身也要有门禁：weekly 检索任务依赖 --fail-below 存在。
+        # 只跑 --help 不够 —— 参数被删掉时 --help 照样 exit 0，必须断言参数出现在输出里。
+        run: python -m eval.run_retrieval_eval --help | grep -q -- "--fail-below"
+
+      # if: always() —— 门禁红了的时候，评估报告恰恰是最重要的诊断证据：
+      # 没它就无法区分「阈值被删了」和「准确率真的掉了」。
       - name: Upload eval reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: eval-reports

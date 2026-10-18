@@ -94,6 +94,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   参数被删掉时它照样 exit 0，必须断言参数出现在输出里。
 - `Upload eval reports` 加 `if: always()`：门禁红了的时候，评估报告恰恰是区分
   「阈值被删了」和「准确率真的掉了」的唯一证据。
+- **依赖声明补齐上界**：`backend/requirements.txt` 10 个直接依赖此前**只有 2 个有上界**
+  （pydantic / mcp），其余 8 个无上界。实测漂移**已经在发生**：`chromadb` 0.5.x →
+  **1.5.9**（跨过 1.0）、`cachetools` 5.x → **7.2.3**、`starlette` → 1.9.0。现按
+  「当前主版本 + 1」补齐上界（`chromadb<2.0` / `fastapi<1.0` / `cachetools<8.0` …），
+  **只挡 major 破损，不挡 minor/patch 修复** —— 挡 minor 会退化成事实 lock。
+  已验证：加完上界后干净 venv 的解析结果与加前**完全一致**（104 个包，无差异），
+  即只改变未来、不改变现状。
+  **明确不做两件事**：① 不生成 lock 文件（自托管单机项目没有多环境对齐需求，
+  且 CI 每次全新安装已在事实上持续验证漂移后的集合）；② 不 pin 传递依赖
+  （numpy / onnxruntime / tokenizers）—— 它们是 chromadb / fastembed 的内部约束，
+  替上游做版本决策会在其正常升级时制造人为冲突。
+  顺带修正旧记录：早期评审写的「`pip install` 卡死 27 分钟、阻断新机器部署」
+  今日复测为 **51 秒**，该问题已从「P1 部署阻断」下调为「首次安装偏慢」。
+  新增 `tests/test_requirements_bounds.py`（14 条）守住「上界必须存在」这条约定，
+  并已证伪：删掉 `chromadb` 上界后精确变红、还原后转绿。
 
 ### Fixed
 - **CI 因非法 YAML 整条停摆（本次改动引入、同批修复）**：新增 step 名写作

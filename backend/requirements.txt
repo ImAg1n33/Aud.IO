@@ -1,10 +1,16 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.31.1
+# 依赖声明约定：每个直接依赖**必须写上界**（主版本 + 1）。
+# 只挡 major 破损，不挡 minor/patch 修复 —— 否则会退化成事实 lock。
+# 上界取值须与当期 `pip install --dry-run` 的解析结果相容 —— 加上界只应改变未来，
+# 不应改变现状（2026-10-19 实测：补齐上界前后解析结果 104 个包完全一致）。
+# 传递依赖（numpy / onnxruntime / tokenizers 等）一律不在此 pin：它们应由
+# chromadb / fastembed 各自约束，替上游做版本决策会在其正常升级时制造人为冲突。
+fastapi>=0.115.0,<1.0
+uvicorn[standard]>=0.31.1,<1.0
 pydantic>=2.11.0,<3.0.0
-pydantic-settings>=2.4.0
-python-dotenv>=1.0.1
-httpx>=0.27.2
-chromadb>=0.5.0
-cachetools>=5.0.0
+pydantic-settings>=2.4.0,<3.0
+python-dotenv>=1.0.1,<2.0
+httpx>=0.27.2,<1.0
+chromadb>=0.5.0,<2.0
+cachetools>=5.0.0,<8.0
 mcp>=1.27,<2.0
-fastembed>=0.7.0
+fastembed>=0.7.0,<1.0
